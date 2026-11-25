@@ -1,0 +1,17 @@
+{
+  "name": "yt-short-studio",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --configLoader runner --host 127.0.0.1",
+    "build": "vite build --configLoader runner",
+    "build:embedded": "vite build --configLoader runner && node scripts/copy-embedded.mjs"
+  },
+  "dependencies": {
+    "vite": "8.3.8",
+    "react": "19.3.1",
+    "react-dom": "19.3.1"
+  },
+  "devDependencies": {}
+}

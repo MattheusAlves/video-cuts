@@ -1,0 +1,50 @@
+channel:
+  name: "SHOT BR"
+  positioning: "News commentary"
+  language: "pt-BR"
+
+sources:
+  - id: lorem
+    channel_url: "https://www.youtube.com/@ipsum"
+    kind: podcast
+    polarity: lorem
+
+
+clip:
+  target_seconds_min: 45
+  target_seconds_max: 60
+  long_form_min_seconds: 240
+  long_form_max_seconds: 1680
+  resolution: "1080x1920"
+  framing: fit_blur
+  captions:
+    enabled: true
+    font: "DejaVu Sans"
+    style: word_highlight
+    position: bottom_third
+
+transcription:
+  provider: local
+  model: "small"
+  language: pt
+  whisper_bin: "whisper.cpp/build/bin/whisper-cli"
+  whisper_model: "models/ggml-small.bin"
+
+selector:
+  provider: openai_compat
+  base_url: "https://opencode.ai/inference/go/openai/v1"
+  chat_model: "kimi-k3"
+  api_key_env: "OPENCODE_API_KEY"
+  candidates_per_episode: 5
+
+storage:
+  sources_dir:   "sources"
+  transcripts:   "transcripts"
+  clips_pending: "clips/pending"
+  state_file:    "state/state.json"
+  keep_sources:  false
+  max_episode_age_days: 14
+
+schedule:
+  fetch_at: "22:00"
+  timezone: "America/Sao_Paulo"

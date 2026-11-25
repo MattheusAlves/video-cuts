@@ -1,0 +1,29 @@
+# Credentials and local settings
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+.aws/
+.codex/
+.agents/
+SESSION_CONTEXT.md
+IMPLEMENTATION_PLAN.md
+
+# Dependencies and build outputs
+web/node_modules/
+web/dist/
+.bin/
+whisper.cpp/
+models/
+
+# Downloaded media, transcripts, run state and generated reviews
+sources/
+transcripts/
+clips/
+state/
+logs/
+
+# Local system files
+.DS_Store
+*.swp
