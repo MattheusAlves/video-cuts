@@ -14,6 +14,44 @@ import (
 	pl "github.com/mitnick/yt-short/pipeline"
 )
 
+func TestJobPersistsTimingReport(t *testing.T) {
+	cfg := uiTestConfig(t)
+	cfg.Storage.StateFile = filepath.Join(t.TempDir(), "state.json")
+	s := &uiServer{cfg: cfg, ctx: context.Background(), jobs: map[string]jobRecord{"job": {ID: "job"}}}
+	s.processJob = func(ctx context.Context, _ pl.Config, _ *pl.State, _ jobRequest) error {
+		pl.StartTiming(ctx, pl.TimingEvent{Stage: "test"})(nil)
+		return nil
+	}
+	s.runJob("job", jobRequest{})
+	b, err := os.ReadFile(filepath.Join(filepath.Dir(cfg.Storage.StateFile), "timings", "job.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"stage":"test"`) {
+		t.Fatalf("missing timing event: %s", b)
+	}
+}
+
+func TestJobProgressTracksStageStart(t *testing.T) {
+	cfg := uiTestConfig(t)
+	cfg.Storage.StateFile = filepath.Join(t.TempDir(), "state.json")
+	s := &uiServer{cfg: cfg, ctx: context.Background(), jobs: map[string]jobRecord{"job": {ID: "job"}}}
+	s.processJob = func(ctx context.Context, _ pl.Config, _ *pl.State, _ jobRequest) error {
+		pl.ReportProgress(ctx, pl.Progress{Stage: "select", Message: "first"})
+		first := *s.jobs["job"].Progress.StageStartedAt
+		pl.ReportProgress(ctx, pl.Progress{Stage: "select", Message: "second"})
+		if !s.jobs["job"].Progress.StageStartedAt.Equal(first) {
+			t.Error("stage start reset within stage")
+		}
+		pl.ReportProgress(ctx, pl.Progress{Stage: "render", Message: "render"})
+		if s.jobs["job"].Progress.StageStartedAt.Before(first) {
+			t.Error("new stage starts before previous stage")
+		}
+		return nil
+	}
+	s.runJob("job", jobRequest{})
+}
+
 func TestPrepareRequestAppliesModeDefaultsAndValidatesInputs(t *testing.T) {
 	cfg := uiTestConfig(t)
 	s := &uiServer{cfg: cfg}
@@ -26,12 +64,12 @@ func TestPrepareRequestAppliesModeDefaultsAndValidatesInputs(t *testing.T) {
 		{
 			name:    "short defaults",
 			request: jobRequest{SourceID: "channel", VideoID: "video"},
-			want:    jobRequest{SourceID: "channel", VideoID: "video", Mode: "short", MinSeconds: 45, MaxSeconds: 60, Resolution: "1080x1920", Framing: "center_crop"},
+			want:    jobRequest{SourceID: "channel", VideoID: "video", Mode: "short", MinSeconds: 45, MaxSeconds: 60, Resolution: "1080x1920", Framing: "center_crop", SelectionMode: "full", TargetCuts: 1},
 		},
 		{
 			name:    "regular video defaults",
 			request: jobRequest{URL: "https://youtu.be/video", Mode: "video"},
-			want:    jobRequest{URL: "https://youtu.be/video", Mode: "video", MinSeconds: 240, MaxSeconds: 1680, Resolution: "1920x1080", Framing: "center_crop"},
+			want:    jobRequest{URL: "https://youtu.be/video", Mode: "video", MinSeconds: 240, MaxSeconds: 1680, Resolution: "1920x1080", Framing: "center_crop", SelectionMode: "full", TargetCuts: 1},
 		},
 		{name: "rejects non YouTube link", request: jobRequest{URL: "https://example.com/watch?v=video"}, wantErr: "YouTube"},
 		{name: "rejects short at 180 seconds", request: jobRequest{SourceID: "channel", VideoID: "video", MaxSeconds: 180}, wantErr: "shorter than 180"},
@@ -39,7 +77,7 @@ func TestPrepareRequestAppliesModeDefaultsAndValidatesInputs(t *testing.T) {
 		{
 			name:    "accepts regular video at 28 minutes",
 			request: jobRequest{URL: "https://youtu.be/video", Mode: "video", MinSeconds: 240, MaxSeconds: 1680},
-			want:    jobRequest{URL: "https://youtu.be/video", Mode: "video", MinSeconds: 240, MaxSeconds: 1680, Resolution: "1920x1080", Framing: "center_crop"},
+			want:    jobRequest{URL: "https://youtu.be/video", Mode: "video", MinSeconds: 240, MaxSeconds: 1680, Resolution: "1920x1080", Framing: "center_crop", SelectionMode: "full", TargetCuts: 1},
 		},
 		{name: "rejects partial source selector", request: jobRequest{SourceID: "channel"}, wantErr: "either a YouTube URL"},
 		{name: "rejects mixed selectors", request: jobRequest{URL: "https://youtu.be/video", SourceID: "channel", VideoID: "video"}, wantErr: "either a YouTube URL"},
@@ -64,6 +102,21 @@ func TestPrepareRequestAppliesModeDefaultsAndValidatesInputs(t *testing.T) {
 				t.Fatalf("normalized request = %#v, want %#v", request, tc.want)
 			}
 		})
+	}
+}
+
+func TestPrepareRequestValidatesSelectionOptions(t *testing.T) {
+	s := &uiServer{cfg: uiTestConfig(t)}
+	for _, tc := range []struct {
+		mode   string
+		target int
+		valid  bool
+	}{{"fast", 3, true}, {"full", 1, true}, {"bad", 1, false}, {"fast", 6, false}, {"fast", -1, false}} {
+		r := jobRequest{URL: "https://youtu.be/video", SelectionMode: tc.mode, TargetCuts: tc.target}
+		err := s.prepareRequest(&r)
+		if (err == nil) != tc.valid {
+			t.Errorf("mode=%s target=%d err=%v", tc.mode, tc.target, err)
+		}
 	}
 }
 
@@ -284,4 +337,59 @@ func uiTestConfig(t *testing.T) pl.Config {
 	cfg.Clip.LongFormMaxSeconds = 1680
 	cfg.Storage.MaxEpisodeAgeDays = 14
 	return cfg
+}
+
+func TestJobAccumulatesProviderCostsAndMissingUsage(t *testing.T) {
+	cfg := uiTestConfig(t)
+	s := &uiServer{cfg: cfg, ctx: context.Background(), jobs: map[string]jobRecord{"job": {ID: "job"}}}
+	s.processJob = func(ctx context.Context, _ pl.Config, _ *pl.State, _ jobRequest) error {
+		a, b := 0.00125, 0.00035
+		pl.ReportProviderUsage(ctx, &pl.ProviderUsage{Cost: &a})
+		pl.ReportProviderUsage(ctx, &pl.ProviderUsage{Cost: &b})
+		pl.ReportProviderUsage(ctx, nil)
+		return nil
+	}
+	s.runJob("job", jobRequest{})
+	r := httptest.NewRequest(http.MethodGet, "/api/jobs", nil)
+	w := httptest.NewRecorder()
+	s.handleJobs(w, r)
+	var jobs []struct {
+		Cost    *float64 `json:"llm_cost_usd"`
+		Calls   int      `json:"llm_calls"`
+		Missing int      `json:"llm_cost_missing_calls"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &jobs); err != nil {
+		t.Fatal(err)
+	}
+	if len(jobs) != 1 || jobs[0].Cost == nil || *jobs[0].Cost < 0.0015999 || *jobs[0].Cost > 0.0016001 || jobs[0].Calls != 3 || jobs[0].Missing != 1 {
+		t.Fatalf("bad usage: %s", w.Body.String())
+	}
+}
+
+func TestPrepareRequestMinimumScoreValidation(t *testing.T) {
+	s := &uiServer{cfg: uiTestConfig(t)}
+	for _, tc := range []struct {
+		score float32
+		valid bool
+	}{{0, true}, {0.7, true}, {1, true}, {-0.01, false}, {1.01, false}} {
+		value := tc.score
+		r := jobRequest{URL: "https://youtu.be/video", MinScore: &value}
+		err := s.prepareRequest(&r)
+		if (err == nil) != tc.valid {
+			t.Errorf("score %v: %v", tc.score, err)
+		}
+	}
+}
+func TestConfigExposesMinimumScore(t *testing.T) {
+	cfg := uiTestConfig(t)
+	cfg.Selector.MinScore = 0.7
+	s := &uiServer{cfg: cfg}
+	w := httptest.NewRecorder()
+	s.handleConfig(w, httptest.NewRequest(http.MethodGet, "/api/config", nil))
+	var response struct {
+		MinScore float32 `json:"min_score"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil || response.MinScore != 0.7 {
+		t.Fatalf("config: %s %v", w.Body.String(), err)
+	}
 }

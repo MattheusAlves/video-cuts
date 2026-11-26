@@ -27,6 +27,33 @@ func TestValidateClipProbeRequiresExpectedStreamsAndDuration(t *testing.T) {
 	}
 }
 
+func TestCutOutputPathDistinguishesSubsecondBoundaries(t *testing.T) {
+	cfg := Config{}
+	cfg.Storage.ClipsPending = t.TempDir()
+	ep := Episode{SourceID: "s", VideoID: "v"}
+	a := CutOutputPath(cfg, ep, Candidate{Start: 1.1, End: 50.1})
+	b := CutOutputPath(cfg, ep, Candidate{Start: 1.2, End: 50.2})
+	if a == b {
+		t.Fatalf("different cuts share output path %s", a)
+	}
+}
+
+func TestVideoEncoderSettings(t *testing.T) {
+	for _, tc := range []struct {
+		setting, encoder string
+		wantErr          bool
+	}{{"", "libx264", false}, {"libx264", "libx264", false}, {"h264_nvenc", "h264_nvenc", false}, {"unknown", "", true}} {
+		args, err := videoEncoderArgs(tc.setting)
+		if (err != nil) != tc.wantErr {
+			t.Errorf("encoder %q: %v", tc.setting, err)
+			continue
+		}
+		if !tc.wantErr && (len(args) < 2 || args[0] != "-c:v" || args[1] != tc.encoder) {
+			t.Errorf("encoder %q got %v", tc.setting, args)
+		}
+	}
+}
+
 func TestCutPreservesExistingClipWhenRenderFails(t *testing.T) {
 	dir := t.TempDir()
 	bin := filepath.Join(t.TempDir(), "ffmpeg")
@@ -35,7 +62,7 @@ func TestCutPreservesExistingClipWhenRenderFails(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", filepath.Dir(bin))
-	existing := filepath.Join(dir, "s__v__00000-00050.mp4")
+	existing := CutOutputPath(Config{Storage: Storage{ClipsPending: dir}}, Episode{SourceID: "s", VideoID: "v"}, Candidate{Start: 0, End: 50})
 	if err := os.WriteFile(existing, []byte("original"), 0o600); err != nil {
 		t.Fatal(err)
 	}

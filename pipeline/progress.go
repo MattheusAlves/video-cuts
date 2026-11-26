@@ -1,13 +1,17 @@
 package pipeline
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 // Progress describes work underway. Window counts apply only to selection.
 type Progress struct {
-	Stage     string `json:"stage"`
-	Message   string `json:"message"`
-	Completed int    `json:"completed,omitempty"`
-	Total     int    `json:"total,omitempty"`
+	Stage          string     `json:"stage"`
+	Message        string     `json:"message"`
+	Completed      int        `json:"completed,omitempty"`
+	Total          int        `json:"total,omitempty"`
+	StageStartedAt *time.Time `json:"stage_started_at,omitempty"`
 }
 
 type progressKey struct{}

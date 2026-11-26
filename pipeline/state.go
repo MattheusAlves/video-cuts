@@ -33,6 +33,7 @@ type Clip struct {
 	LongForm           bool     `yaml:"-"`
 	Resolution         string   `yaml:"resolution"`
 	Framing            string   `yaml:"framing"`
+	VideoEncoder       string   `yaml:"video_encoder"`
 	Captions           Captions `yaml:"captions"`
 }
 type Captions struct {
@@ -53,11 +54,19 @@ type Transcription struct {
 
 // Selector
 type Selector struct {
-	Provider             string `yaml:"provider"`
-	ChatModel            string `yaml:"chat_model"`
-	BaseURL              string `yaml:"base_url"`
-	APIKeyEnv            string `yaml:"api_key_env"`
-	CandidatesPerEpisode int    `yaml:"candidates_per_episode"`
+	Provider             string  `yaml:"provider"`
+	ChatModel            string  `yaml:"chat_model"`
+	BaseURL              string  `yaml:"base_url"`
+	APIKeyEnv            string  `yaml:"api_key_env"`
+	CandidatesPerEpisode int     `yaml:"candidates_per_episode"`
+	MinScore             float32 `yaml:"min_score"`
+	SelectionMode        string  `yaml:"-"`
+	TargetCuts           int     `yaml:"-"`
+	PromptFormat         string  `yaml:"prompt_format"`
+	WindowSeconds        int     `yaml:"window_seconds"`
+	ReasoningEffort      string  `yaml:"reasoning_effort"`
+	MaxTokens            int     `yaml:"max_tokens"`
+	Concurrency          int     `yaml:"concurrency"`
 }
 
 // Storage

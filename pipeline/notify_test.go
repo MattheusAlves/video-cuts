@@ -55,3 +55,28 @@ func TestReviewPageShowsExistingClipAndEscapesStory(t *testing.T) {
 		t.Fatal("review page includes an unavailable clip")
 	}
 }
+
+func TestReviewPageCreatesMissingDirectory(t *testing.T) {
+	cfg := Config{}
+	cfg.Storage.ClipsPending = filepath.Join(t.TempDir(), "missing")
+	if err := WriteReviewPage(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(cfg.Storage.ClipsPending, "index.html")); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestUploadDescriptionIncludesFullVideoLinkOnlyWhenAvailable(t *testing.T) {
+	clip := PendingClip{Candidate: Candidate{Description: "Um contexto útil.", Hashtags: []string{"#IA", "#Tecnologia"}}, SourceURL: "https://youtu.be/example"}
+	got := UploadDescription(clip)
+	for _, part := range []string{"Um contexto útil.", "Assista ao vídeo completo: https://youtu.be/example", "#IA #Tecnologia"} {
+		if !strings.Contains(got, part) {
+			t.Errorf("missing %q: %q", part, got)
+		}
+	}
+	clip.SourceURL = ""
+	if got := UploadDescription(clip); strings.Contains(got, "Assista ao vídeo completo") {
+		t.Errorf("empty link: %q", got)
+	}
+}

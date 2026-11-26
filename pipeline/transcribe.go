@@ -89,7 +89,10 @@ func Transcribe(ctx context.Context, cfg Config, ep Episode, _ string) (Transcri
 	defer os.RemoveAll(tmp)
 	wav := filepath.Join(tmp, "audio.wav")
 	convert := exec.CommandContext(ctx, "ffmpeg", "-nostdin", "-v", "error", "-y", "-i", ep.AudioPath, "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", wav)
-	if output, err := convert.CombinedOutput(); err != nil {
+	finishConvert := StartTiming(ctx, TimingEvent{Stage: "audio_conversion", SourceID: ep.SourceID, VideoID: ep.VideoID})
+	output, err := convert.CombinedOutput()
+	finishConvert(err)
+	if err != nil {
 		return Transcript{}, fmt.Errorf("convert audio: %w: %s", err, strings.TrimSpace(string(output)))
 	}
 	outBase := filepath.Join(tmp, "transcript")
@@ -101,7 +104,9 @@ func Transcribe(ctx context.Context, cfg Config, ep Episode, _ string) (Transcri
 	var stderr bytes.Buffer
 	cmd.Stdout = io.Discard
 	cmd.Stderr = io.MultiWriter(os.Stderr, &stderr)
+	finishInference := StartTiming(ctx, TimingEvent{Stage: "transcription", SourceID: ep.SourceID, VideoID: ep.VideoID})
 	err = cmd.Run()
+	finishInference(err)
 	if err != nil {
 		return Transcript{}, fmt.Errorf("whisper.cpp: %w: %s", err, strings.TrimSpace(stderr.String()))
 	}

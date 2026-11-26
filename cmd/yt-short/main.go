@@ -394,6 +394,29 @@ func saveJSON(path string, v any) error {
 	return os.WriteFile(path, b, 0o644)
 }
 
+func saveJSONAtomic(path string, v any) error {
+	b, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return err
+	}
+	f, err := os.CreateTemp(filepath.Dir(path), ".marker-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(f.Name())
+	if _, err := f.Write(b); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return os.Rename(f.Name(), path)
+}
+
 func loadJSON(path string, v any) error {
 	b, err := os.ReadFile(path)
 	if err != nil {
