@@ -19,6 +19,9 @@ func BuildASSWithHook(cfg Config, t Transcript, start, end float64) (string, err
 }
 
 func buildASS(cfg Config, t Transcript, start, end float64, emphasizeHook bool) (string, error) {
+	if cfg.Clip.Captions.Style != "" && cfg.Clip.Captions.Style != "word_highlight" && cfg.Clip.Captions.Style != "plain" {
+		return "", fmt.Errorf("unknown caption style %q", cfg.Clip.Captions.Style)
+	}
 	width, height, err := parseResolution(cfg.Clip.Resolution)
 	if err != nil {
 		return "", err
@@ -61,6 +64,9 @@ Style: HookCap,%s,88,&H0000FFFF,&H00FFFFFF,&H00000000,&H80000000,-1,0,0,0,100,10
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 `
+	if cfg.Clip.Captions.Style == "plain" {
+		header = strings.ReplaceAll(header, "&H0000FFFF", "&H00FFFFFF")
+	}
 	header = fmt.Sprintf(header, width, height, cfg.Clip.Captions.Font, cfg.Clip.Captions.Font)
 
 	var b strings.Builder
@@ -93,7 +99,11 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 			if k > 0 {
 				text.WriteString(" ")
 			}
-			fmt.Fprintf(&text, "{\\kf%d}%s", durCS, escapeASSText(word))
+			if cfg.Clip.Captions.Style == "plain" {
+				text.WriteString(escapeASSText(word))
+			} else {
+				fmt.Fprintf(&text, "{\\kf%d}%s", durCS, escapeASSText(word))
+			}
 		}
 
 		style := "Cap"

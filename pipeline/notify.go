@@ -14,10 +14,13 @@ import (
 // PendingClip is the sidecar metadata used by the human review page.
 type PendingClip struct {
 	Candidate
-	SourceTitle string    `json:"source_title"`
-	SourceURL   string    `json:"source_url"`
-	ClipPath    string    `json:"clip_path"`
-	CreatedAt   time.Time `json:"created_at"`
+	SourceTitle       string    `json:"source_title"`
+	SourceURL         string    `json:"source_url"`
+	ClipPath          string    `json:"clip_path"`
+	CreatedAt         time.Time `json:"created_at"`
+	RenderFingerprint string    `json:"render_fingerprint,omitempty"`
+	UploadDescription string    `json:"upload_description,omitempty"`
+	ThumbnailPath     string    `json:"thumbnail_path,omitempty"`
 }
 
 // NowUTC is a small indirection so tests can stub the clock later.
@@ -29,7 +32,35 @@ func WritePendingSidecar(clipPath string, meta PendingClip) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(strings.TrimSuffix(clipPath, ".mp4")+".json", b, 0o644)
+	path := strings.TrimSuffix(clipPath, ".mp4") + ".json"
+	f, err := os.CreateTemp(filepath.Dir(path), ".sidecar-*.json")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(f.Name())
+	if _, err = f.Write(b); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err = f.Close(); err != nil {
+		return err
+	}
+	return os.Rename(f.Name(), path)
+}
+
+// UploadDescription assembles the suggested copy and a link to the full source.
+func UploadDescription(clip PendingClip) string {
+	var parts []string
+	if text := strings.TrimSpace(clip.Description); text != "" {
+		parts = append(parts, text)
+	}
+	if source := strings.TrimSpace(clip.SourceURL); source != "" {
+		parts = append(parts, "Assista ao vídeo completo: "+source)
+	}
+	if tags := strings.TrimSpace(strings.Join(clip.Hashtags, " ")); tags != "" {
+		parts = append(parts, tags)
+	}
+	return strings.Join(parts, "\n\n")
 }
 
 // ListPending reads all pending clip sidecars, newest first.
@@ -40,6 +71,9 @@ func ListPending(cfg Config) ([]PendingClip, error) {
 	}
 	var clips []PendingClip
 	for _, p := range paths {
+		if strings.HasSuffix(p, ".rendering.json") {
+			continue
+		}
 		b, err := os.ReadFile(p)
 		if err != nil {
 			continue
@@ -52,6 +86,10 @@ func ListPending(cfg Config) ([]PendingClip, error) {
 		if err != nil || !info.Mode().IsRegular() || info.Size() == 0 {
 			continue
 		}
+		if info, err := os.Stat(ThumbnailPath(c.ClipPath)); err == nil && info.Mode().IsRegular() && info.Size() > 0 {
+			c.ThumbnailPath = ThumbnailPath(c.ClipPath)
+		}
+		c.UploadDescription = UploadDescription(c)
 		clips = append(clips, c)
 	}
 	sort.SliceStable(clips, func(i, j int) bool {
@@ -65,6 +103,9 @@ func ListPending(cfg Config) ([]PendingClip, error) {
 func WriteReviewPage(cfg Config) error {
 	clips, err := ListPending(cfg)
 	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(cfg.Storage.ClipsPending, 0o755); err != nil {
 		return err
 	}
 	var h strings.Builder
@@ -88,8 +129,11 @@ code{user-select:all}.score{font-size:1.2em}
 	for _, c := range clips {
 		base := filepath.Base(c.ClipPath)
 		title := html.EscapeString(c.Title)
-		desc := html.EscapeString(c.Description + "\n\n" + strings.Join(c.Hashtags, " ") + "\n\nFonte: " + c.SourceURL)
+		desc := html.EscapeString(c.UploadDescription)
 		h.WriteString(`<section class="clip"><video controls preload="metadata" src="` + html.EscapeString(base) + `"></video>`)
+		if c.ThumbnailPath != "" {
+			h.WriteString(`<a href="` + html.EscapeString(filepath.Base(c.ThumbnailPath)) + `" download>Baixar capa</a>`)
+		}
 		h.WriteString(`<div class="meta"><div class="score">Score ` + fmt.Sprintf("%.2f", c.Score) + `</div>`)
 		h.WriteString("<h2>" + title + "</h2>")
 		h.WriteString(`<p class="small">Fonte: <a style="color:#9cf" href="` + html.EscapeString(c.SourceURL) + `">` + html.EscapeString(c.SourceTitle) + `</a><br>`)

@@ -1,27 +1,54 @@
 # SHOT BR
 
 Downloads recent episodes, transcribes them locally with whisper.cpp, selects
-candidate moments through OpenCode Go, and renders captioned vertical clips.
+candidate moments through OpenRouter, and renders captioned vertical clips.
 Review and upload are manual.
 
 ## Setup
 
 Run commands from this directory. The project needs Go, yt-dlp, ffmpeg,
 ffprobe, whisper.cpp and a multilingual Whisper model. Configure their paths in
-`config.yaml`. Put `OPENCODE_API_KEY=...` in `.env` and restrict access to the
+`config.yaml`. Copy `.env.example` to `.env`, set `OPENROUTER_API_KEY`, and restrict access to the
 file (`chmod 600 .env`). Do not put the key in `config.yaml`.
 The Go command loads simple `KEY=value` assignments from `.env`; variables
 already exported in the shell take precedence. Restart the backend after edits.
 
-The selector currently uses Kimi K3 through OpenCode Go. Selection sends
+UI jobs record stage timings as JSON Lines in the `timings` directory next to
+the configured state file (normally `state/timings/`). Events include duration,
+outcome and cache reuse, without transcript text or provider credentials. The
+pipeline panel shows elapsed time for the active stage.
+When the provider returns usage, the report also records input, output,
+reasoning and cached tokens, the provider/model, and cost when available.
+No usage is inferred when the provider omits it.
+
+For controlled selector experiments, set `selector.prompt_format` to
+`compact` and `selector.window_seconds` to `360` in `config.yaml`. The
+defaults (`legacy` and `0`) retain the existing prompt and window sizing.
+Compact mode maps segment IDs and literal boundary quotes to local word
+timestamps and rejects ambiguous or missing matches. Compare resulting cuts
+and actual provider usage before adopting it for production.
+
+Selection uses one provider request at a time by default. Set
+`selector.concurrency: 2` to allow two window requests concurrently.
+Completed windows are checkpointed and provider errors stop further scheduling.
+
+CPU rendering uses `clip.video_encoder: libx264`. To opt in to NVIDIA GPU
+encoding, set it to `h264_nvenc` and restart the backend. FFmpeg must have
+NVENC support and access to a compatible GPU; if initialization fails, select
+`libx264` to use the CPU. Verify video quality on your own footage.
+
+The selector currently uses GLM 5.3 Flash through OpenRouter. Selection sends
 episode transcripts to that service. The Whisper small model runs locally and
 may take close to the duration of the source audio on this laptop.
+The default selector requests low reasoning effort and limits output to 4,096
+tokens; a truncated response is reported as an error rather than used as a cut.
 
 The selector ranks attention signals such as surprise, strong opinions,
 conflict, revelations and quotable lines. Each candidate must open with a
-literal spoken hook in its first three seconds; the hook is checked against
-word timestamps, gets larger opening captions, and is reviewed along with the
-complete story. Selection uses the transcript, so it cannot identify silent
+literal spoken hook; for Shorts the quoted hook must begin with the first
+spoken words. A separate editorial review judges the first three seconds on
+their own as well as the complete story. Quotes are checked against word
+timestamps and opening captions are enlarged. Selection uses the transcript, so it cannot identify silent
 visual reactions. These checks can reject every candidate and do not guarantee
 retention; review the whole clip and its context. For wide shots, `fit_blur`
 framing preserves the source frame over a blurred vertical background.
@@ -40,16 +67,32 @@ The URL must point to a single YouTube video; playlist pages and other sites
 are not accepted. The result is labeled `adhoc` in the review page.
 
 For frontend development, start the Go backend from the project root with
-`go run ./cmd/yt-short --ui`. In a second terminal, run `npm install` and
+`go run ./cmd/yt-short --ui`. The Recent runs panel shows the estimated LLM cost in USD using provider-reported charges for completed calls. The amount is partial when a call does not report a cost; unavailable means no cost was reported. Job history is kept for the current studio session. In a second terminal, run `npm install` and
 `npm run dev` from `web/`, then open the address printed by Vite (normally
 `http://127.0.0.1:5173/`). Vite proxies API and clip requests to the backend.
 Choose a configured channel and recent video, or paste
 a YouTube video link. The form selects Short or regular-video output, duration,
-frame, framing, and captions. Regular videos default to 4–28 minutes and
+frame, framing, captions (yellow word highlight or plain white), and a minimum editorial score from 0 to 100. The
+studio scans the full transcript and renders distinct candidates that meet the
+threshold and pass story and timing checks. The score is a subjective AI
+estimate of attention potential, not a prediction of views or virality. The
+default threshold comes from `selector.min_score` (0.0–1.0) in `config.yaml`;
+`candidates_per_episode` limits proposals per transcript window, so the scan
+can still miss moments. Regular videos default to 4–28 minutes and
 landscape output; the 28-minute maximum is enforced by the pipeline. Renders
-appear in the review queue in the studio and in `clips/pending/`. To rebuild the
+appear in the review queue in the studio and in `clips/pending/`. Each new cut
+also gets a separate JPEG cover made from a frame and its suggested title; the
+studio lets you preview and download it. FFmpeg needs the drawtext filter and a
+suitable font. Covers are suggestions for review; existing cuts receive one
+when their job is retried. In the review queue, **Extend to video** selects a longer, coherent range surrounding the chosen cut; **Create Short** selects a shorter range inside it. Set the target format and its duration range in the form before converting, or the target format defaults are used. The original stays in the queue. Conversion may download the source again and may return no result if no range passes the duration, score and editorial checks. To rebuild the
 embedded UI after editing it, run `npm run build:embedded` from `web/`, then
 rebuild the Go binary. The embedded app is served at `http://127.0.0.1:8765/`.
+
+Each proposed clip must explain the essential subject and context in the spoken
+cut itself. Suggested titles are intended to make sense to new viewers and
+create honest curiosity; descriptions add context and link to the full source
+when its URL is available. These are model-generated suggestions and should be
+reviewed against the source. Existing titles and descriptions are not rewritten.
 
 Open `clips/pending/index.html` to review the video, captions and suggested
 text. Confirm claims and context against the source, then upload the MP4 with

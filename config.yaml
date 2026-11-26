@@ -17,6 +17,7 @@ clip:
   long_form_max_seconds: 1680
   resolution: "1080x1920"
   framing: fit_blur
+  video_encoder: libx264
   captions:
     enabled: true
     font: "DejaVu Sans"
@@ -32,10 +33,21 @@ transcription:
 
 selector:
   provider: openai_compat
-  base_url: "https://opencode.ai/inference/go/openai/v1"
-  chat_model: "kimi-k3"
-  api_key_env: "OPENCODE_API_KEY"
+  base_url: "https://openrouter.ai/api/v1"
+  chat_model: "z-ai/glm-5.3-flash"
+  api_key_env: "OPENROUTER_API_KEY"
+  reasoning_effort: low
+  max_tokens: 4096
+  # Set to 2 to allow at most two simultaneous selector window requests.
+  concurrency: 1
+  # Minimum estimated editorial score (0.0–1.0) needed to render a cut.
+  min_score: 0.7
+  # Maximum proposals requested per transcript window, not a per-video limit.
   candidates_per_episode: 5
+  # Experimental: set prompt_format to compact and window_seconds to 360
+  # to compare with the default timestamped, 180-second scan.
+  prompt_format: legacy
+  window_seconds: 0
 
 storage:
   sources_dir:   "sources"

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"net/url"
@@ -30,7 +31,7 @@ func runPipeline(ctx context.Context, cfg pl.Config, st *pl.State, sourceFilter,
 	}
 	var failures []error
 	matched := false
-	produced := 0
+	processed := 0
 	onlyMBL := true
 	for _, src := range cfg.Sources {
 		if sourceFilter != "" && src.ID != sourceFilter {
@@ -51,16 +52,16 @@ func runPipeline(ctx context.Context, cfg pl.Config, st *pl.State, sourceFilter,
 				break
 			}
 		} else if len(st.Seen) > seenBefore {
-			produced++
+			processed++
 			if src.Polarity != "mbl" {
 				onlyMBL = false
 			}
 		}
 	}
-	if produced > 0 && onlyMBL {
-		log.Printf("editorial balance: all %d clips produced in this run are from the MBL family", produced)
+	if processed > 0 && onlyMBL {
+		log.Printf("editorial balance: all %d episodes processed in this run are from the MBL family", processed)
 	}
-	log.Printf("daily summary: %d clips produced, %d source failures", produced, len(failures))
+	log.Printf("daily summary: %d episodes processed, %d source failures", processed, len(failures))
 	if !matched && sourceFilter != "" {
 		failures = append(failures, fmt.Errorf("unknown source %q", sourceFilter))
 	}
@@ -134,6 +135,9 @@ func pipelinePreflight(ctx context.Context, cfg pl.Config) error {
 	}
 	if cfg.Selector.Provider != "openai_compat" {
 		return fmt.Errorf("unsupported selector provider %q", cfg.Selector.Provider)
+	}
+	if cfg.Selector.Concurrency < 0 || cfg.Selector.Concurrency > 2 {
+		return fmt.Errorf("selector concurrency must be 1 or 2")
 	}
 	endpoint, err := url.Parse(cfg.Selector.BaseURL)
 	if err != nil || endpoint.Host == "" || (endpoint.Scheme != "https" && endpoint.Scheme != "http") {
@@ -245,13 +249,16 @@ func processEpisode(ctx context.Context, cfg pl.Config, st *pl.State, input pl.E
 	}()
 	base := filepath.Join(cfg.Storage.SourcesDir, ep.SourceID+"__"+ep.VideoID)
 	if nonemptyFile(base+".audio.m4a") && nonemptyFile(base+".mp4") {
+		pl.StartTiming(ctx, pl.TimingEvent{Stage: "download", SourceID: ep.SourceID, VideoID: ep.VideoID, Reused: true})(nil)
 		pl.ReportProgress(ctx, pl.Progress{Stage: "download", Message: "Reusing downloaded video and audio"})
 		ep.AudioPath, ep.VideoPath = base+".audio.m4a", base+".mp4"
 		log.Printf("%s: reusing downloaded media for %s", ep.SourceID, ep.VideoID)
 	} else {
 		pl.ReportProgress(ctx, pl.Progress{Stage: "download", Message: "Downloading video and audio"})
 		log.Printf("%s: downloading %s %q", ep.SourceID, ep.VideoID, ep.Title)
+		finishDownload := pl.StartTiming(ctx, pl.TimingEvent{Stage: "download", SourceID: ep.SourceID, VideoID: ep.VideoID})
 		ep, err = pl.DownloadEpisode(ctx, ep, cfg)
+		finishDownload(err)
 		if err != nil {
 			st.Fails[ep.VideoID] = err.Error()
 			return fmt.Errorf("download: %w", err)
@@ -270,24 +277,36 @@ func processEpisode(ctx context.Context, cfg pl.Config, st *pl.State, input pl.E
 			st.Fails[ep.VideoID] = err.Error()
 			return fmt.Errorf("transcribe: %w", err)
 		}
+		finishSave := pl.StartTiming(ctx, pl.TimingEvent{Stage: "transcript_save", SourceID: ep.SourceID, VideoID: ep.VideoID})
 		transPath, err = pl.SaveTranscript(cfg, ep.SourceID, tr)
+		finishSave(err)
 		if err != nil {
 			return fmt.Errorf("save transcript: %w", err)
 		}
 	} else {
+		pl.StartTiming(ctx, pl.TimingEvent{Stage: "transcription", SourceID: ep.SourceID, VideoID: ep.VideoID, Reused: true})(nil)
 		pl.ReportProgress(ctx, pl.Progress{Stage: "transcribe", Message: "Reusing existing transcript"})
 		log.Printf("%s: reusing transcript %s", ep.SourceID, transPath)
 	}
 	log.Printf("%s: transcript %s (%d words, %d segments)", ep.SourceID, transPath, len(tr.Words), len(tr.Segments))
 
 	pl.ReportProgress(ctx, pl.Progress{Stage: "select", Message: "Searching transcript for strong cuts"})
+	finishSelection := pl.StartTiming(ctx, pl.TimingEvent{Stage: "selection", SourceID: ep.SourceID, VideoID: ep.VideoID})
 	cands, err := pl.Select(ctx, cfg, ep, tr)
+	finishSelection(err)
 	if err != nil {
 		st.Fails[ep.VideoID] = err.Error()
 		return fmt.Errorf("select: %w", err)
 	}
 	if len(cands) == 0 {
-		return fmt.Errorf("no candidates")
+		pl.ReportProgress(ctx, pl.Progress{Stage: "finalize", Message: "No cuts met the minimum score and review criteria"})
+		st.MarkSeen(ep.VideoID)
+		delete(st.Fails, ep.VideoID)
+		if err := st.Save(); err != nil {
+			return fmt.Errorf("save state: %w", err)
+		}
+		cleanupSources(cfg, ep)
+		return nil
 	}
 	candPath := transPath[:len(transPath)-len(".json")] + ".candidates.json"
 	if err := saveJSON(candPath, cands); err != nil {
@@ -295,42 +314,102 @@ func processEpisode(ctx context.Context, cfg pl.Config, st *pl.State, input pl.E
 	}
 	sort.SliceStable(cands, func(i, j int) bool { return cands[i].Score > cands[j].Score })
 
-	var chosen *pl.Candidate
+	var chosen []pl.Candidate
 	for i := range cands {
 		d := cands[i].End - cands[i].Start
 		// Keep the chosen duration inside the active Shorts or long-form profile.
 		if d >= float64(cfg.Clip.TargetSecondsMin) && d <= float64(cfg.Clip.TargetSecondsMax) && cands[i].Start >= 0 && cands[i].End <= tr.DurationS {
-			chosen = &cands[i]
-			break
+			chosen = append(chosen, cands[i])
 		}
 	}
-	if chosen == nil {
+	if len(chosen) == 0 {
 		return fmt.Errorf("all candidates outside accepted duration")
 	}
-	pl.ReportProgress(ctx, pl.Progress{Stage: "render", Message: "Rendering video and captions"})
-	clipPath, err := pl.Cut(ctx, cfg, ep, tr, *chosen)
-	if err != nil {
-		st.Fails[ep.VideoID] = err.Error()
-		return fmt.Errorf("cut: %w", err)
+	for i, candidate := range chosen {
+		pl.ReportProgress(ctx, pl.Progress{Stage: "render", Message: fmt.Sprintf("Rendering cut %d of %d", i+1, len(chosen)), Completed: i, Total: len(chosen)})
+		path := pl.CutOutputPath(cfg, ep, candidate)
+		fingerprint := pl.RenderFingerprint(cfg, candidate, tr)
+		markerPath := path + ".rendering.json"
+		meta := pl.PendingClip{Candidate: candidate, SourceTitle: ep.Title, SourceURL: ep.URL, ClipPath: path, CreatedAt: pl.NowUTC(), RenderFingerprint: fingerprint}
+		var existing pl.PendingClip
+		reusable := loadJSON(strings.TrimSuffix(path, ".mp4")+".json", &existing) == nil && existing.RenderFingerprint == fingerprint && existing.ClipPath == path && nonemptyFile(path) && pl.VerifyRenderedClip(ctx, cfg, path, candidate.End-candidate.Start) == nil
+		if reusable {
+			if err := ensureThumbnail(ctx, path, candidate); err != nil {
+				return fmt.Errorf("cover %d: %w", i+1, err)
+			}
+			pl.StartTiming(ctx, pl.TimingEvent{Stage: "render", SourceID: ep.SourceID, VideoID: ep.VideoID, Reused: true})(nil)
+			continue
+		}
+		var marker pl.PendingClip
+		markerErr := loadJSON(markerPath, &marker)
+		if markerErr == nil && (marker.RenderFingerprint != fingerprint || marker.ClipPath != path) {
+			return fmt.Errorf("cut %d has an incompatible recovery marker: %s", i+1, markerPath)
+		}
+		if nonemptyFile(path) {
+			if markerErr != nil || pl.VerifyRenderedClip(ctx, cfg, path, candidate.End-candidate.Start) != nil {
+				return fmt.Errorf("cut %d already exists but cannot be verified for these settings: %s", i+1, path)
+			}
+			if err := ensureThumbnail(ctx, path, candidate); err != nil {
+				return fmt.Errorf("cover %d: %w", i+1, err)
+			}
+			if err := pl.WritePendingSidecar(path, marker); err != nil {
+				return fmt.Errorf("recover sidecar %d: %w", i+1, err)
+			}
+			if err := os.Remove(markerPath); err != nil {
+				return fmt.Errorf("remove recovery marker: %w", err)
+			}
+			pl.StartTiming(ctx, pl.TimingEvent{Stage: "render", SourceID: ep.SourceID, VideoID: ep.VideoID, Reused: true})(nil)
+			continue
+		}
+		if markerErr != nil && !os.IsNotExist(markerErr) {
+			var syntaxErr *json.SyntaxError
+			if !errors.As(markerErr, &syntaxErr) && !errors.Is(markerErr, io.EOF) {
+				return fmt.Errorf("read recovery marker: %w", markerErr)
+			}
+		}
+		if markerErr != nil {
+			if err := saveJSONAtomic(markerPath, meta); err != nil {
+				return fmt.Errorf("save recovery marker: %w", err)
+			}
+		}
+		finishRender := pl.StartTiming(ctx, pl.TimingEvent{Stage: "render", SourceID: ep.SourceID, VideoID: ep.VideoID})
+		clipPath, err := pl.Cut(ctx, cfg, ep, tr, candidate)
+		finishRender(err)
+		if err != nil {
+			return fmt.Errorf("cut %d: %w", i+1, err)
+		}
+		if err := ensureThumbnail(ctx, clipPath, candidate); err != nil {
+			return fmt.Errorf("cover %d: %w", i+1, err)
+		}
+		if err := pl.WritePendingSidecar(clipPath, meta); err != nil {
+			return fmt.Errorf("sidecar %d: %w", i+1, err)
+		}
+		if err := os.Remove(markerPath); err != nil {
+			return fmt.Errorf("remove recovery marker: %w", err)
+		}
+		log.Printf("%s: ready %s — %s", ep.SourceID, clipPath, candidate.Title)
 	}
-	pl.ReportProgress(ctx, pl.Progress{Stage: "finalize", Message: "Saving cut for review"})
-	meta := pl.PendingClip{
-		Candidate:   *chosen,
-		SourceTitle: ep.Title,
-		SourceURL:   ep.URL,
-		ClipPath:    clipPath,
-		CreatedAt:   pl.NowUTC(),
-	}
-	if err := pl.WritePendingSidecar(clipPath, meta); err != nil {
-		return fmt.Errorf("sidecar: %w", err)
-	}
+	pl.ReportProgress(ctx, pl.Progress{Stage: "finalize", Message: fmt.Sprintf("Prepared %d qualifying cuts", len(chosen))})
+	finishFinalize := pl.StartTiming(ctx, pl.TimingEvent{Stage: "finalize", SourceID: ep.SourceID, VideoID: ep.VideoID})
+	defer func() { finishFinalize(resultErr) }()
 	st.MarkSeen(ep.VideoID)
 	delete(st.Fails, ep.VideoID)
 	if err := st.Save(); err != nil {
 		return fmt.Errorf("save state: %w", err)
 	}
-	log.Printf("%s: ready %s — %s", ep.SourceID, clipPath, chosen.Title)
 
+	cleanupSources(cfg, ep)
+	return nil
+}
+
+func ensureThumbnail(ctx context.Context, clipPath string, candidate pl.Candidate) error {
+	if nonemptyFile(pl.ThumbnailPath(clipPath)) {
+		return nil
+	}
+	return pl.GenerateThumbnail(ctx, clipPath, candidate.Title, candidate.End-candidate.Start)
+}
+
+func cleanupSources(cfg pl.Config, ep pl.Episode) {
 	if !cfg.Storage.KeepSources {
 		for _, p := range []string{ep.AudioPath, ep.VideoPath} {
 			if p != "" {
@@ -340,7 +419,6 @@ func processEpisode(ctx context.Context, cfg pl.Config, st *pl.State, input pl.E
 			}
 		}
 	}
-	return nil
 }
 
 func nonemptyFile(path string) bool {

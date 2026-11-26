@@ -277,6 +277,11 @@ func main() {
 				failed = true
 				continue
 			}
+			if err := ensureThumbnail(ctx, out, c); err != nil {
+				log.Printf("cut [%d] cover: %v", i, err)
+				failed = true
+				continue
+			}
 			rendered++
 			fmt.Printf("OK [%d] %s (%s)\n", i, out, c.Title)
 		}
@@ -392,6 +397,29 @@ func saveJSON(path string, v any) error {
 		return err
 	}
 	return os.WriteFile(path, b, 0o644)
+}
+
+func saveJSONAtomic(path string, v any) error {
+	b, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return err
+	}
+	f, err := os.CreateTemp(filepath.Dir(path), ".marker-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(f.Name())
+	if _, err := f.Write(b); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return os.Rename(f.Name(), path)
 }
 
 func loadJSON(path string, v any) error {

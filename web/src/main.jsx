@@ -24,6 +24,7 @@ function elapsed(job) {
 function App() {
   const [config, setConfig] = useState(null);
   const [mode, setMode] = useState('short');
+  const [minScore, setMinScore] = useState(70);
   const [inputType, setInputType] = useState('library');
   const [source, setSource] = useState('');
   const [videos, setVideos] = useState([]);
@@ -34,6 +35,7 @@ function App() {
   const [resolution, setResolution] = useState('1080x1920');
   const [framing, setFraming] = useState('fit_blur');
   const [captions, setCaptions] = useState(true);
+  const [captionStyle, setCaptionStyle] = useState('word_highlight');
   const [jobs, setJobs] = useState([]);
   const [clips, setClips] = useState([]);
   const [loadingVideos, setLoadingVideos] = useState(false);
@@ -70,6 +72,8 @@ function App() {
       setMinSeconds(data.short.min_seconds || 45);
       setMaxSeconds(data.short.max_seconds || 60);
       setCaptions(Boolean(data.captions_enabled));
+      setCaptionStyle(data.caption_style || 'word_highlight');
+      setMinScore(Math.round((data.min_score ?? 0.7) * 100));
     }).catch((e) => setError(e.message));
     refreshClips();
     refreshJobs();
@@ -101,8 +105,8 @@ function App() {
     setError('');
     setSubmitting(true);
     const request = {
-      mode, min_seconds: Number(minSeconds), max_seconds: Number(maxSeconds),
-      resolution, framing, captions_enabled: captions,
+      mode, min_score: Number(minScore) / 100, min_seconds: Number(minSeconds), max_seconds: Number(maxSeconds),
+      resolution, framing, captions_enabled: captions, caption_style: captionStyle,
     };
     if (inputType === 'url') request.url = url.trim();
     else { request.source_id = source; request.video_id = videoID; }
@@ -113,6 +117,19 @@ function App() {
       setJobs((current) => [job, ...current]);
     } catch (e) { setError(e.message); }
     finally { setSubmitting(false); }
+  }
+
+  async function convertClip(filename, targetMode) {
+    setError(''); setSubmitting(true);
+    const target = config[targetMode];
+    const request = { convert_clip: filename, mode: targetMode, min_score: Number(minScore) / 100,
+      min_seconds: mode === targetMode ? Number(minSeconds) : target.min_seconds,
+      max_seconds: mode === targetMode ? Number(maxSeconds) : target.max_seconds,
+      resolution: targetMode === 'short' ? '1080x1920' : '1920x1080', framing, captions_enabled: captions, caption_style: captionStyle };
+    try {
+      const job = await api('/api/jobs', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(request) });
+      setJobs((current) => [job, ...current]);
+    } catch (e) { setError(e.message); } finally { setSubmitting(false); }
   }
 
   if (!config) return <main className="boot">Opening Cutroom…</main>;
@@ -162,6 +179,8 @@ function App() {
             </button>
           </div>
 
+          <label className="field"><span>MINIMUM EDITORIAL SCORE (0–100)</span><input type="number" min="0" max="100" step="1" value={minScore} onChange={(e) => setMinScore(e.target.value)} required /></label>
+          <p className="form-footnote">The full video is scanned. Cuts that meet this score and pass review are generated. The score is an AI editorial estimate, not a guarantee of views.</p>
           <div className="field-label duration-heading">CUT SETTINGS <span>{mode === 'short' ? 'IN SECONDS' : 'IN MINUTES'}</span></div>
           <div className="settings-grid">
             <label className="field"><span>MIN LENGTH</span><div className="number-wrap"><input type="number" min={mode === 'short' ? 1 : 1} max={mode === 'short' ? 179 : Math.floor(maxSeconds / 60)} step="1" value={mode === 'short' ? minSeconds : Math.floor(minSeconds / 60)} onChange={(e) => setMinSeconds(Number(e.target.value) * (mode === 'short' ? 1 : 60))} /><b>{mode === 'short' ? 'sec' : 'min'}</b></div></label>
@@ -169,9 +188,10 @@ function App() {
             <label className="field"><span>FRAME</span><select value={resolution} onChange={(e) => setResolution(e.target.value)}><option value="1080x1920">Vertical · 9:16</option><option value="1920x1080">Landscape · 16:9</option></select></label>
             <label className="field"><span>FILL</span><select value={framing} onChange={(e) => setFraming(e.target.value)}><option value="fit_blur">Fit with blurred sides</option><option value="center_crop">Crop to frame</option></select></label>
           </div>
-          <label className="caption-setting"><span className="caption-icon">Aa</span><span><b>Burn in captions</b><small>Word-level subtitles with a highlighted hook</small></span><input type="checkbox" checked={captions} onChange={(e) => setCaptions(e.target.checked)} /><i /></label>
+          <label className="caption-setting"><span className="caption-icon">Aa</span><span><b>Burn in captions</b><small>Choose highlighted or plain white captions</small></span><input type="checkbox" checked={captions} onChange={(e) => setCaptions(e.target.checked)} /><i /></label>
+          <label className="field"><span>CAPTION STYLE</span><select value={captionStyle} onChange={(e) => setCaptionStyle(e.target.value)} disabled={!captions}><option value="word_highlight">Yellow word highlight</option><option value="plain">Plain white</option></select></label>
           <button className="submit" type="submit" disabled={submitting || (inputType === 'library' && !videoID) || (inputType === 'url' && !url.trim())}>
-            {submitting ? 'Starting pipeline…' : <>Generate cut <span>↗</span></>}
+            {submitting ? 'Starting pipeline…' : <>Generate cuts <span>↗</span></>}
           </button>
           <p className="form-footnote">The selector looks for a strong opening hook, a complete story, and a clear payoff.</p>
         </form>
@@ -179,22 +199,22 @@ function App() {
 
       <aside className="side-column">
         <section className="panel pipeline-panel"><div className="panel-heading"><div><span className="step">02</span><h2>Pipeline</h2></div><span className="live-pill"><i /> {activeJob?.status === 'running' ? 'RUNNING' : 'READY'}</span></div>
-          {activeJob && <p className="pipeline-current" aria-live="polite">{activeJob.message} {elapsed(activeJob) && <span>· {elapsed(activeJob)}</span>}</p>}
+          {activeJob && <p className="pipeline-current" aria-live="polite">{activeJob.message} {elapsed(activeJob) && <span>· {elapsed(activeJob)}</span>}{activeJob.status === 'running' && activeJob.progress?.stage_started_at && <span> · stage {fmt(Math.max(0, Math.floor((Date.now() - Date.parse(activeJob.progress.stage_started_at)) / 1000)))}</span>}</p>}
           <ol className="pipeline-list">{stages.map((stage, index) => {
             const state = activeJob?.status === 'done' || (stageIndex >= 0 && index < stageIndex) ? 'complete' : index === stageIndex && activeJob?.status === 'running' ? 'current' : index === stageIndex && activeJob?.status === 'failed' ? 'failed' : '';
             return <li className={state} key={stage.id}><span>{state === 'complete' ? '✓' : String(index + 1).padStart(2, '0')}</span><div><b>{stage.label}</b><small>{state === 'current' ? activeJob.progress.message : stage.description}</small>{state === 'current' && stage.id === 'select' && activeJob.progress.total > 0 && <progress max={activeJob.progress.total} value={activeJob.progress.completed || 0} aria-label="Transcript windows analyzed" />}</div></li>;
           })}</ol>
         </section>
         <section className="panel jobs-panel"><div className="panel-heading"><div><span className="step">03</span><h2>Recent runs</h2></div><button className="icon-button" onClick={refreshJobs} aria-label="Refresh jobs">↻</button></div>
-          {jobs.length === 0 ? <p className="empty">Your runs will appear here.</p> : <div className="job-list">{jobs.slice(0, 5).map((job) => <div className="job" key={job.id}><div className={`job-indicator ${job.status}`} /><div className="job-copy"><b>{job.request.url || job.request.video_id || 'YouTube video'}</b><small>{job.request.mode === 'video' ? 'Regular video' : 'Short'} · {job.message || job.status}{elapsed(job) ? ` · ${elapsed(job)}` : ''}</small>{job.error && <small className="job-error">{job.error}</small>}</div><span className={`status ${job.status}`}>{job.status}</span></div>)}</div>}
+          {jobs.length === 0 ? <p className="empty">Your runs will appear here.</p> : <div className="job-list">{jobs.slice(0, 5).map((job) => <div className="job" key={job.id}><div className={`job-indicator ${job.status}`} /><div className="job-copy"><b>{job.request.url || job.request.video_id || 'YouTube video'}</b><small>{job.request.mode === 'video' ? 'Regular video' : 'Short'} · {job.message || job.status}{elapsed(job) ? ` · ${elapsed(job)}` : ''}</small>{job.llm_calls > 0 && <small>LLM cost: {job.llm_cost_usd == null ? 'unavailable' : `${job.llm_cost_usd > 0 && job.llm_cost_usd < 0.000001 ? '<$0.000001' : `$${job.llm_cost_usd.toFixed(6)}`} estimate${job.llm_cost_missing_calls > 0 ? ' (partial)' : ''}`} · {job.llm_calls} call{job.llm_calls === 1 ? '' : 's'}</small>}{job.error && <small className="job-error">{job.error}</small>}</div><span className={`status ${job.status}`}>{job.status}</span></div>)}</div>}
         </section>
       </aside>
     </div>
 
     <section className="results-section"><div className="results-heading"><div><span className="step">04</span><h2>Ready to review</h2></div><span className="result-count">{clips.length} CUT{clips.length === 1 ? '' : 'S'}</span></div>
-      {clips.length === 0 ? <div className="empty-results"><div className="empty-frame">▭</div><b>Your next cut will land here.</b><span>Completed renders are saved in your review queue.</span></div> : <div className="clip-grid">{clips.slice(0, 6).map((clip) => {
+      {clips.length === 0 ? <div className="empty-results"><div className="empty-frame">▭</div><b>Your next cut will land here.</b><span>Completed renders are saved in your review queue.</span></div> : <div className="clip-grid">{clips.map((clip) => {
         const filename = clip.clip_path.split(/[\\/]/).pop();
-        return <article className="clip-card" key={filename}><video controls preload="metadata" src={`/clips/${encodeURIComponent(filename)}`} /><div className="clip-meta"><div className="clip-score">RETENTION {Math.round(clip.score * 100)}%</div><h3>{clip.title}</h3><p>{clip.virality_reason || clip.rationale}</p>{clip.hook_quote && <blockquote>“{clip.hook_quote}”</blockquote>}<div className="clip-bottom"><span>{fmt(clip.end - clip.start)} · {clip.source_title}</span><a href={`/clips/${encodeURIComponent(filename)}`} download>Download MP4 ↓</a></div></div></article>;
+        return <article className="clip-card" key={filename}><video controls preload="metadata" src={`/clips/${encodeURIComponent(filename)}`} /><div className="clip-meta"><div className="clip-score">EDITORIAL SCORE {Math.round(clip.score * 100)}/100 · ESTIMATE</div><h3>{clip.title}</h3><p>{clip.virality_reason || clip.rationale}</p>{clip.thumbnail_path && <details><summary>Cover preview</summary><img alt="Generated cover" style={{ width: '100%', maxHeight: 320, objectFit: 'contain' }} src={`/clips/${encodeURIComponent(clip.thumbnail_path.split(/[\\/]/).pop())}`} /></details>}{clip.upload_description && <details><summary>Suggested description</summary><textarea aria-label="Suggested description" rows={5} readOnly value={clip.upload_description} /></details>}{clip.hook_quote && <blockquote>“{clip.hook_quote}”</blockquote>}<small>Conversion uses the duration settings above for the selected format, or that format’s defaults.</small><div className="conversion-actions"><button type="button" disabled={submitting} onClick={() => convertClip(filename, 'short')}>Create Short</button><button type="button" disabled={submitting} onClick={() => convertClip(filename, 'video')}>Extend to video</button></div><div className="clip-bottom"><span>{fmt(clip.end - clip.start)} · {clip.source_title}</span><a href={`/clips/${encodeURIComponent(filename)}`} download>Download MP4 ↓</a>{clip.thumbnail_path && <a href={`/clips/${encodeURIComponent(clip.thumbnail_path.split(/[\\/]/).pop())}`} download>Download cover ↓</a>}</div></div></article>;
       })}</div>}
     </section>
     <footer><span>Cutroom</span><span>Built for thoughtful cuts. Runs on this machine.</span></footer>

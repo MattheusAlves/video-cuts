@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -37,10 +38,14 @@ func Cut(ctx context.Context, cfg Config, ep Episode, t Transcript, c Candidate)
 	if err != nil {
 		return "", err
 	}
+	encoderArgs, err := videoEncoderArgs(cfg.Clip.VideoEncoder)
+	if err != nil {
+		return "", err
+	}
 
 	// Output paths
-	outName := fmt.Sprintf("%s__%05d-%05d.mp4", ep.SourceID+"__"+ep.VideoID, int(start), int(end))
-	outPath := filepath.Join(cfg.Storage.ClipsPending, outName)
+	outPath := CutOutputPath(cfg, ep, c)
+	outName := filepath.Base(outPath)
 	temp, err := os.CreateTemp(cfg.Storage.ClipsPending, ".render-*.mp4")
 	if err != nil {
 		return "", fmt.Errorf("create temporary clip: %w", err)
@@ -101,7 +106,9 @@ func Cut(ctx context.Context, cfg Config, ep Episode, t Transcript, c Candidate)
 	args = append(args,
 		"-af", "loudnorm=I=-14:TP=-1.5:LRA=11",
 		"-r", "30",
-		"-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-threads", "3",
+	)
+	args = append(args, encoderArgs...)
+	args = append(args,
 		"-c:a", "aac", "-b:a", "192k",
 		"-movflags", "+faststart",
 		tempPath,
@@ -120,6 +127,44 @@ func Cut(ctx context.Context, cfg Config, ep Episode, t Transcript, c Candidate)
 		return "", fmt.Errorf("publish rendered clip: %w", err)
 	}
 	return outPath, nil
+}
+
+func videoEncoderArgs(encoder string) ([]string, error) {
+	switch encoder {
+	case "", "libx264":
+		return []string{"-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-threads", "3"}, nil
+	case "h264_nvenc":
+		return []string{"-c:v", "h264_nvenc", "-preset", "p4", "-rc", "vbr", "-cq", "25", "-b:v", "0"}, nil
+	default:
+		return nil, fmt.Errorf("unknown video encoder %q (use libx264 or h264_nvenc)", encoder)
+	}
+}
+
+// CutOutputPath uses millisecond boundaries so adjacent candidates do not collide.
+func CutOutputPath(cfg Config, ep Episode, c Candidate) string {
+	suffix := ""
+	if cfg.Clip.Captions.Style == "plain" {
+		suffix = "__plain"
+	}
+	name := fmt.Sprintf("%s__%s__%012d-%012d%s.mp4", ep.SourceID, ep.VideoID, int64(math.Round(c.Start*1000)), int64(math.Round(c.End*1000)), suffix)
+	return filepath.Join(cfg.Storage.ClipsPending, name)
+}
+
+func RenderFingerprint(cfg Config, c Candidate, transcript Transcript) string {
+	b, _ := json.Marshal(struct {
+		Clip       Clip
+		Candidate  Candidate
+		Transcript Transcript
+	}{cfg.Clip, c, transcript})
+	return fmt.Sprintf("%x", sha256.Sum256(b))
+}
+
+func VerifyRenderedClip(ctx context.Context, cfg Config, path string, duration float64) error {
+	w, h, err := parseResolution(cfg.Clip.Resolution)
+	if err != nil {
+		return err
+	}
+	return verifyRenderedClipDimensions(ctx, path, duration, w, h)
 }
 
 func verifyRenderedClip(ctx context.Context, path string, expectedDuration float64) error {

@@ -26,27 +26,35 @@ import (
 var webFiles embed.FS
 
 type jobRequest struct {
-	URL             string `json:"url"`
-	SourceID        string `json:"source_id"`
-	VideoID         string `json:"video_id"`
-	Mode            string `json:"mode"`
-	MinSeconds      int    `json:"min_seconds"`
-	MaxSeconds      int    `json:"max_seconds"`
-	Resolution      string `json:"resolution"`
-	Framing         string `json:"framing"`
-	CaptionsEnabled *bool  `json:"captions_enabled"`
+	ConvertClip     string   `json:"convert_clip,omitempty"`
+	SelectionMode   string   `json:"selection_mode"`
+	TargetCuts      int      `json:"target_cuts"`
+	MinScore        *float32 `json:"min_score,omitempty"`
+	URL             string   `json:"url"`
+	SourceID        string   `json:"source_id"`
+	VideoID         string   `json:"video_id"`
+	Mode            string   `json:"mode"`
+	MinSeconds      int      `json:"min_seconds"`
+	MaxSeconds      int      `json:"max_seconds"`
+	Resolution      string   `json:"resolution"`
+	Framing         string   `json:"framing"`
+	CaptionsEnabled *bool    `json:"captions_enabled"`
+	CaptionStyle    string   `json:"caption_style,omitempty"`
 }
 
 type jobRecord struct {
-	ID         string       `json:"id"`
-	Status     string       `json:"status"`
-	Message    string       `json:"message,omitempty"`
-	Error      string       `json:"error,omitempty"`
-	Request    jobRequest   `json:"request"`
-	CreatedAt  time.Time    `json:"created_at"`
-	StartedAt  *time.Time   `json:"started_at,omitempty"`
-	FinishedAt *time.Time   `json:"finished_at,omitempty"`
-	Progress   *pl.Progress `json:"progress,omitempty"`
+	ID                  string       `json:"id"`
+	Status              string       `json:"status"`
+	Message             string       `json:"message,omitempty"`
+	Error               string       `json:"error,omitempty"`
+	Request             jobRequest   `json:"request"`
+	CreatedAt           time.Time    `json:"created_at"`
+	StartedAt           *time.Time   `json:"started_at,omitempty"`
+	FinishedAt          *time.Time   `json:"finished_at,omitempty"`
+	Progress            *pl.Progress `json:"progress,omitempty"`
+	LLMCostUSD          *float64     `json:"llm_cost_usd,omitempty"`
+	LLMCalls            int          `json:"llm_calls"`
+	LLMCostMissingCalls int          `json:"llm_cost_missing_calls"`
 }
 
 type uiServer struct {
@@ -137,6 +145,8 @@ func (s *uiServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 		"short":            map[string]int{"min_seconds": s.cfg.Clip.TargetSecondsMin, "max_seconds": s.cfg.Clip.TargetSecondsMax},
 		"video":            map[string]int{"min_seconds": s.cfg.Clip.LongFormMinSeconds, "max_seconds": s.cfg.Clip.LongFormMaxSeconds},
 		"captions_enabled": s.cfg.Clip.Captions.Enabled,
+		"caption_style":    s.cfg.Clip.Captions.Style,
+		"min_score":        s.cfg.Selector.MinScore,
 	})
 }
 
@@ -185,9 +195,37 @@ func (s *uiServer) handleStartJob(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *uiServer) prepareRequest(request *jobRequest) error {
+	if request.CaptionStyle != "" && request.CaptionStyle != "word_highlight" && request.CaptionStyle != "plain" {
+		return fmt.Errorf("invalid caption style")
+	}
+	if request.MinScore != nil && (*request.MinScore < 0 || *request.MinScore > 1) {
+		return fmt.Errorf("minimum score must be between 0 and 1")
+	}
+	if request.SelectionMode == "" {
+		request.SelectionMode = "full"
+	}
+	if request.SelectionMode != "full" && request.SelectionMode != "fast" {
+		return fmt.Errorf("selection mode must be full or fast")
+	}
+	if request.TargetCuts == 0 {
+		request.TargetCuts = 1
+	}
+	if request.TargetCuts < 1 || request.TargetCuts > 5 {
+		return fmt.Errorf("cut count must be between 1 and 5")
+	}
 	request.URL = strings.TrimSpace(request.URL)
 	request.SourceID = strings.TrimSpace(request.SourceID)
 	request.VideoID = strings.TrimSpace(request.VideoID)
+	if request.ConvertClip != "" {
+		if request.URL != "" || request.SourceID != "" || request.VideoID != "" {
+			return fmt.Errorf("conversion must identify only a saved clip")
+		}
+		clip, err := s.conversionClip(request.ConvertClip)
+		if err != nil {
+			return err
+		}
+		request.URL = clip.SourceURL
+	}
 	hasURL := request.URL != ""
 	hasSourceVideo := request.SourceID != "" && request.VideoID != ""
 	if hasURL == hasSourceVideo {
@@ -265,16 +303,51 @@ func (s *uiServer) runJob(id string, request jobRequest) {
 		job.StartedAt = &started
 	})
 	cfg := s.cfg
+	cfg.Selector.SelectionMode = "full"
+	if request.MinScore != nil {
+		cfg.Selector.MinScore = *request.MinScore
+	}
 	cfg.Clip.LongForm = request.Mode == "video"
 	cfg.Clip.TargetSecondsMin, cfg.Clip.TargetSecondsMax = request.MinSeconds, request.MaxSeconds
 	cfg.Clip.Resolution, cfg.Clip.Framing = request.Resolution, request.Framing
 	if request.CaptionsEnabled != nil {
 		cfg.Clip.Captions.Enabled = *request.CaptionsEnabled
 	}
+	if request.CaptionStyle != "" {
+		cfg.Clip.Captions.Style = request.CaptionStyle
+	}
 	ctx, cancel := context.WithTimeout(s.ctx, 24*time.Hour)
 	defer cancel()
+	ctx = pl.WithProviderUsage(ctx, func(usage *pl.ProviderUsage) {
+		s.updateJob(id, func(job *jobRecord) {
+			job.LLMCalls++
+			if usage == nil || usage.Cost == nil {
+				job.LLMCostMissingCalls++
+				return
+			}
+			amount := *usage.Cost
+			if job.LLMCostUSD != nil {
+				amount += *job.LLMCostUSD
+			}
+			job.LLMCostUSD = &amount
+		})
+	})
+	if cfg.Storage.StateFile != "" {
+		ctx = pl.WithTiming(ctx, pl.NewTimingRecorder(filepath.Join(filepath.Dir(cfg.Storage.StateFile), "timings", id+".jsonl"), id))
+	}
+	var identity pl.TimingIdentity
+	finishJob := pl.StartTiming(ctx, pl.TimingEvent{Stage: "job", Fingerprint: &identity})
+	if cfg.Storage.StateFile != "" {
+		identity = pl.TimingFingerprint(cfg)
+	}
 	ctx = pl.WithProgress(ctx, func(progress pl.Progress) {
 		s.updateJob(id, func(job *jobRecord) {
+			if job.Progress != nil && job.Progress.Stage == progress.Stage && job.Progress.StageStartedAt != nil {
+				progress.StageStartedAt = job.Progress.StageStartedAt
+			} else {
+				now := time.Now().UTC()
+				progress.StageStartedAt = &now
+			}
 			job.Progress = &progress
 			job.Message = progress.Message
 		})
@@ -283,6 +356,11 @@ func (s *uiServer) runJob(id string, request jobRequest) {
 	var err error
 	if s.processJob != nil {
 		err = s.processJob(ctx, cfg, s.state, request)
+	} else if request.ConvertClip != "" {
+		err = s.convertSavedClip(ctx, cfg, request)
+		if err == nil {
+			err = pl.WriteReviewPage(cfg)
+		}
 	} else if request.URL != "" {
 		ep, inspectErr := pl.InspectYouTubeURL(ctx, request.URL)
 		if inspectErr != nil {
@@ -303,6 +381,7 @@ func (s *uiServer) runJob(id string, request jobRequest) {
 		err = runPipeline(ctx, cfg, s.state, request.SourceID, request.VideoID)
 	}
 	finished := time.Now().UTC()
+	finishJob(err)
 	if err != nil {
 		s.updateJob(id, func(job *jobRecord) {
 			job.Status = "failed"
@@ -315,6 +394,9 @@ func (s *uiServer) runJob(id string, request jobRequest) {
 	s.updateJob(id, func(job *jobRecord) {
 		job.Status = "done"
 		job.Message = "Video is ready for review"
+		if job.Progress != nil && job.Progress.Stage == "finalize" {
+			job.Message = job.Progress.Message
+		}
 		job.FinishedAt = &finished
 	})
 }
@@ -362,7 +444,7 @@ func (s *uiServer) handleClips(w http.ResponseWriter, _ *http.Request) {
 
 func (s *uiServer) handleClipFile(w http.ResponseWriter, r *http.Request) {
 	name := filepath.Base(r.PathValue("name"))
-	if name == "." || !strings.HasSuffix(strings.ToLower(name), ".mp4") {
+	if name == "." || !(strings.HasSuffix(strings.ToLower(name), ".mp4") || strings.HasSuffix(strings.ToLower(name), ".cover.jpg")) {
 		http.NotFound(w, r)
 		return
 	}
