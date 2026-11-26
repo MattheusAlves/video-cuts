@@ -26,6 +26,7 @@ import (
 var webFiles embed.FS
 
 type jobRequest struct {
+	ConvertClip     string   `json:"convert_clip,omitempty"`
 	SelectionMode   string   `json:"selection_mode"`
 	TargetCuts      int      `json:"target_cuts"`
 	MinScore        *float32 `json:"min_score,omitempty"`
@@ -38,6 +39,7 @@ type jobRequest struct {
 	Resolution      string   `json:"resolution"`
 	Framing         string   `json:"framing"`
 	CaptionsEnabled *bool    `json:"captions_enabled"`
+	CaptionStyle    string   `json:"caption_style,omitempty"`
 }
 
 type jobRecord struct {
@@ -143,6 +145,7 @@ func (s *uiServer) handleConfig(w http.ResponseWriter, r *http.Request) {
 		"short":            map[string]int{"min_seconds": s.cfg.Clip.TargetSecondsMin, "max_seconds": s.cfg.Clip.TargetSecondsMax},
 		"video":            map[string]int{"min_seconds": s.cfg.Clip.LongFormMinSeconds, "max_seconds": s.cfg.Clip.LongFormMaxSeconds},
 		"captions_enabled": s.cfg.Clip.Captions.Enabled,
+		"caption_style":    s.cfg.Clip.Captions.Style,
 		"min_score":        s.cfg.Selector.MinScore,
 	})
 }
@@ -192,6 +195,9 @@ func (s *uiServer) handleStartJob(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *uiServer) prepareRequest(request *jobRequest) error {
+	if request.CaptionStyle != "" && request.CaptionStyle != "word_highlight" && request.CaptionStyle != "plain" {
+		return fmt.Errorf("invalid caption style")
+	}
 	if request.MinScore != nil && (*request.MinScore < 0 || *request.MinScore > 1) {
 		return fmt.Errorf("minimum score must be between 0 and 1")
 	}
@@ -210,6 +216,16 @@ func (s *uiServer) prepareRequest(request *jobRequest) error {
 	request.URL = strings.TrimSpace(request.URL)
 	request.SourceID = strings.TrimSpace(request.SourceID)
 	request.VideoID = strings.TrimSpace(request.VideoID)
+	if request.ConvertClip != "" {
+		if request.URL != "" || request.SourceID != "" || request.VideoID != "" {
+			return fmt.Errorf("conversion must identify only a saved clip")
+		}
+		clip, err := s.conversionClip(request.ConvertClip)
+		if err != nil {
+			return err
+		}
+		request.URL = clip.SourceURL
+	}
 	hasURL := request.URL != ""
 	hasSourceVideo := request.SourceID != "" && request.VideoID != ""
 	if hasURL == hasSourceVideo {
@@ -297,6 +313,9 @@ func (s *uiServer) runJob(id string, request jobRequest) {
 	if request.CaptionsEnabled != nil {
 		cfg.Clip.Captions.Enabled = *request.CaptionsEnabled
 	}
+	if request.CaptionStyle != "" {
+		cfg.Clip.Captions.Style = request.CaptionStyle
+	}
 	ctx, cancel := context.WithTimeout(s.ctx, 24*time.Hour)
 	defer cancel()
 	ctx = pl.WithProviderUsage(ctx, func(usage *pl.ProviderUsage) {
@@ -337,6 +356,11 @@ func (s *uiServer) runJob(id string, request jobRequest) {
 	var err error
 	if s.processJob != nil {
 		err = s.processJob(ctx, cfg, s.state, request)
+	} else if request.ConvertClip != "" {
+		err = s.convertSavedClip(ctx, cfg, request)
+		if err == nil {
+			err = pl.WriteReviewPage(cfg)
+		}
 	} else if request.URL != "" {
 		ep, inspectErr := pl.InspectYouTubeURL(ctx, request.URL)
 		if inspectErr != nil {
@@ -420,7 +444,7 @@ func (s *uiServer) handleClips(w http.ResponseWriter, _ *http.Request) {
 
 func (s *uiServer) handleClipFile(w http.ResponseWriter, r *http.Request) {
 	name := filepath.Base(r.PathValue("name"))
-	if name == "." || !strings.HasSuffix(strings.ToLower(name), ".mp4") {
+	if name == "." || !(strings.HasSuffix(strings.ToLower(name), ".mp4") || strings.HasSuffix(strings.ToLower(name), ".cover.jpg")) {
 		http.NotFound(w, r)
 		return
 	}

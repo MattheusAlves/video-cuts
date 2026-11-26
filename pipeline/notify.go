@@ -20,6 +20,7 @@ type PendingClip struct {
 	CreatedAt         time.Time `json:"created_at"`
 	RenderFingerprint string    `json:"render_fingerprint,omitempty"`
 	UploadDescription string    `json:"upload_description,omitempty"`
+	ThumbnailPath     string    `json:"thumbnail_path,omitempty"`
 }
 
 // NowUTC is a small indirection so tests can stub the clock later.
@@ -85,6 +86,9 @@ func ListPending(cfg Config) ([]PendingClip, error) {
 		if err != nil || !info.Mode().IsRegular() || info.Size() == 0 {
 			continue
 		}
+		if info, err := os.Stat(ThumbnailPath(c.ClipPath)); err == nil && info.Mode().IsRegular() && info.Size() > 0 {
+			c.ThumbnailPath = ThumbnailPath(c.ClipPath)
+		}
 		c.UploadDescription = UploadDescription(c)
 		clips = append(clips, c)
 	}
@@ -127,6 +131,9 @@ code{user-select:all}.score{font-size:1.2em}
 		title := html.EscapeString(c.Title)
 		desc := html.EscapeString(c.UploadDescription)
 		h.WriteString(`<section class="clip"><video controls preload="metadata" src="` + html.EscapeString(base) + `"></video>`)
+		if c.ThumbnailPath != "" {
+			h.WriteString(`<a href="` + html.EscapeString(filepath.Base(c.ThumbnailPath)) + `" download>Baixar capa</a>`)
+		}
 		h.WriteString(`<div class="meta"><div class="score">Score ` + fmt.Sprintf("%.2f", c.Score) + `</div>`)
 		h.WriteString("<h2>" + title + "</h2>")
 		h.WriteString(`<p class="small">Fonte: <a style="color:#9cf" href="` + html.EscapeString(c.SourceURL) + `">` + html.EscapeString(c.SourceTitle) + `</a><br>`)

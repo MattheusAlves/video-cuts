@@ -334,6 +334,9 @@ func processEpisode(ctx context.Context, cfg pl.Config, st *pl.State, input pl.E
 		var existing pl.PendingClip
 		reusable := loadJSON(strings.TrimSuffix(path, ".mp4")+".json", &existing) == nil && existing.RenderFingerprint == fingerprint && existing.ClipPath == path && nonemptyFile(path) && pl.VerifyRenderedClip(ctx, cfg, path, candidate.End-candidate.Start) == nil
 		if reusable {
+			if err := ensureThumbnail(ctx, path, candidate); err != nil {
+				return fmt.Errorf("cover %d: %w", i+1, err)
+			}
 			pl.StartTiming(ctx, pl.TimingEvent{Stage: "render", SourceID: ep.SourceID, VideoID: ep.VideoID, Reused: true})(nil)
 			continue
 		}
@@ -345,6 +348,9 @@ func processEpisode(ctx context.Context, cfg pl.Config, st *pl.State, input pl.E
 		if nonemptyFile(path) {
 			if markerErr != nil || pl.VerifyRenderedClip(ctx, cfg, path, candidate.End-candidate.Start) != nil {
 				return fmt.Errorf("cut %d already exists but cannot be verified for these settings: %s", i+1, path)
+			}
+			if err := ensureThumbnail(ctx, path, candidate); err != nil {
+				return fmt.Errorf("cover %d: %w", i+1, err)
 			}
 			if err := pl.WritePendingSidecar(path, marker); err != nil {
 				return fmt.Errorf("recover sidecar %d: %w", i+1, err)
@@ -372,6 +378,9 @@ func processEpisode(ctx context.Context, cfg pl.Config, st *pl.State, input pl.E
 		if err != nil {
 			return fmt.Errorf("cut %d: %w", i+1, err)
 		}
+		if err := ensureThumbnail(ctx, clipPath, candidate); err != nil {
+			return fmt.Errorf("cover %d: %w", i+1, err)
+		}
 		if err := pl.WritePendingSidecar(clipPath, meta); err != nil {
 			return fmt.Errorf("sidecar %d: %w", i+1, err)
 		}
@@ -391,6 +400,13 @@ func processEpisode(ctx context.Context, cfg pl.Config, st *pl.State, input pl.E
 
 	cleanupSources(cfg, ep)
 	return nil
+}
+
+func ensureThumbnail(ctx context.Context, clipPath string, candidate pl.Candidate) error {
+	if nonemptyFile(pl.ThumbnailPath(clipPath)) {
+		return nil
+	}
+	return pl.GenerateThumbnail(ctx, clipPath, candidate.Title, candidate.End-candidate.Start)
 }
 
 func cleanupSources(cfg pl.Config, ep pl.Episode) {

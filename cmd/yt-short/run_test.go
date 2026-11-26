@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"image"
+	"image/jpeg"
 	"io"
 	"net/http"
 	"os"
@@ -26,8 +28,19 @@ func TestSimulatedJobRecordsAllStages(t *testing.T) {
 	if err := os.MkdirAll(bin, 0755); err != nil {
 		t.Fatal(err)
 	}
+	fixture, err := os.Create(filepath.Join(dir, "fixture.jpg"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := jpeg.Encode(fixture, image.NewRGBA(image.Rect(0, 0, 2, 2)), nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.Close(); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("YT_TEST_THUMBNAIL", filepath.Join(dir, "fixture.jpg"))
 	for name, script := range map[string]string{
-		"ffmpeg":  "#!/bin/sh\nfor arg do last=$arg; done\nprintf video > \"$last\"\n",
+		"ffmpeg":  "#!/bin/sh\nfor arg do last=$arg; done\ncase \"$last\" in *.jpg) cp \"$YT_TEST_THUMBNAIL\" \"$last\" ;; *) printf video > \"$last\" ;; esac\n",
 		"ffprobe": "#!/bin/sh\nprintf '%s' '{\"streams\":[{\"codec_name\":\"h264\",\"width\":1080,\"height\":1920},{\"codec_name\":\"aac\"}],\"format\":{\"duration\":\"50\"}}'\n",
 	} {
 		if err := os.WriteFile(filepath.Join(bin, name), []byte(script), 0755); err != nil {
@@ -42,7 +55,10 @@ func TestSimulatedJobRecordsAllStages(t *testing.T) {
 		body, _ := io.ReadAll(r.Body)
 		response := `{"clips":[{"start":0,"end":50,"score":0.8,"title":"title","hook_quote":"começo claro","attention_signals":["curiosity"],"virality_reason":"reason","story":{"setup_quote":"começo claro","development_quote":"algo mudou","conclusion_quote":"final chegou"}},{"start":70,"end":120,"score":0.7,"title":"second","hook_quote":"começo claro","attention_signals":["curiosity"],"virality_reason":"reason","story":{"setup_quote":"começo claro","development_quote":"algo mudou","conclusion_quote":"final chegou"}}]}`
 		if strings.Contains(string(body), "Avalie cada corte") {
-			response = `{"reviews":[{"index":0,"complete":true,"hook_strong":true},{"index":1,"complete":true,"hook_strong":true}]}`
+			response = `{"reviews":[{"index":0,"complete":true,"hook_strong":true}]}`
+			if strings.Contains(string(body), "CORTE 1") {
+				response = `{"reviews":[{"index":0,"complete":true,"hook_strong":true},{"index":1,"complete":true,"hook_strong":true}]}`
+			}
 		}
 		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(fmt.Sprintf(`{"usage":{"cost":0.001},"choices":[{"message":{"content":%q}}]}`, response)))}, nil
 	})
@@ -89,6 +105,12 @@ func TestSimulatedJobRecordsAllStages(t *testing.T) {
 	if err != nil || len(clips) != 2 {
 		t.Fatalf("expected two clips, got %d: %v", len(clips), err)
 	}
+	for _, clip := range clips {
+		if clip.ThumbnailPath == "" {
+			t.Fatal("generated clip has no cover")
+		}
+	}
+
 	b, err := os.ReadFile(filepath.Join(filepath.Dir(cfg.Storage.StateFile), "timings", "job.jsonl"))
 	if err != nil {
 		t.Fatal(err)
@@ -160,6 +182,38 @@ func TestSimulatedJobRecordsAllStages(t *testing.T) {
 	s.runJob("truncated", jobRequest{Mode: "short", MinSeconds: 45, MaxSeconds: 60, Resolution: "1080x1920", Framing: "center_crop", TargetCuts: 1})
 	if s.jobs["truncated"].Status != "done" {
 		t.Fatalf("truncated marker retry: %s", s.jobs["truncated"].Error)
+	}
+
+	// Convert a saved short while preserving the original, using cached source and transcript.
+	cfg.Transcription.Provider, cfg.Transcription.WhisperBin, cfg.Transcription.WhisperModel = "local", "/bin/true", filepath.Join(dir, "fixture.jpg")
+	cfg.Selector.ChatModel = "test"
+	cfg.Clip.LongForm = true
+	for _, suffix := range []string{".audio.m4a", ".mp4"} {
+		if err := os.WriteFile(filepath.Join(cfg.Storage.SourcesDir, "s2__v2"+suffix), []byte("cached"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := pl.SaveTranscript(cfg, "s2", pl.Transcript{VideoID: "v2", DurationS: 120, Segments: []pl.Segment{{Start: 0, End: 120, Text: "test"}}, Words: words}); err != nil {
+		t.Fatal(err)
+	}
+	originalPath := filepath.Join(cfg.Storage.ClipsPending, "original.mp4")
+	if err := os.WriteFile(originalPath, []byte("original"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	original := pl.PendingClip{Candidate: pl.Candidate{SourceID: "s2", VideoID: "v2", Start: 10, End: 40}, SourceURL: "https://youtu.be/v2", ClipPath: originalPath}
+	if err := pl.WritePendingSidecar(originalPath, original); err != nil {
+		t.Fatal(err)
+	}
+	s.cfg = cfg
+	if err := s.convertSavedClip(context.Background(), cfg, jobRequest{ConvertClip: "original.mp4", Mode: "video"}); err != nil {
+		t.Fatalf("conversion: %v", err)
+	}
+	if data, err := os.ReadFile(originalPath); err != nil || string(data) != "original" {
+		t.Fatalf("original changed: %s %v", data, err)
+	}
+	result := pl.CutOutputPath(cfg, pl.Episode{SourceID: "s2", VideoID: "v2"}, pl.Candidate{Start: 0, End: 50})
+	if !nonemptyFile(result) || !nonemptyFile(pl.ThumbnailPath(result)) {
+		t.Fatal("conversion video or cover missing")
 	}
 
 }

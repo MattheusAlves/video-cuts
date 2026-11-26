@@ -35,6 +35,7 @@ function App() {
   const [resolution, setResolution] = useState('1080x1920');
   const [framing, setFraming] = useState('fit_blur');
   const [captions, setCaptions] = useState(true);
+  const [captionStyle, setCaptionStyle] = useState('word_highlight');
   const [jobs, setJobs] = useState([]);
   const [clips, setClips] = useState([]);
   const [loadingVideos, setLoadingVideos] = useState(false);
@@ -71,6 +72,7 @@ function App() {
       setMinSeconds(data.short.min_seconds || 45);
       setMaxSeconds(data.short.max_seconds || 60);
       setCaptions(Boolean(data.captions_enabled));
+      setCaptionStyle(data.caption_style || 'word_highlight');
       setMinScore(Math.round((data.min_score ?? 0.7) * 100));
     }).catch((e) => setError(e.message));
     refreshClips();
@@ -104,7 +106,7 @@ function App() {
     setSubmitting(true);
     const request = {
       mode, min_score: Number(minScore) / 100, min_seconds: Number(minSeconds), max_seconds: Number(maxSeconds),
-      resolution, framing, captions_enabled: captions,
+      resolution, framing, captions_enabled: captions, caption_style: captionStyle,
     };
     if (inputType === 'url') request.url = url.trim();
     else { request.source_id = source; request.video_id = videoID; }
@@ -115,6 +117,19 @@ function App() {
       setJobs((current) => [job, ...current]);
     } catch (e) { setError(e.message); }
     finally { setSubmitting(false); }
+  }
+
+  async function convertClip(filename, targetMode) {
+    setError(''); setSubmitting(true);
+    const target = config[targetMode];
+    const request = { convert_clip: filename, mode: targetMode, min_score: Number(minScore) / 100,
+      min_seconds: mode === targetMode ? Number(minSeconds) : target.min_seconds,
+      max_seconds: mode === targetMode ? Number(maxSeconds) : target.max_seconds,
+      resolution: targetMode === 'short' ? '1080x1920' : '1920x1080', framing, captions_enabled: captions, caption_style: captionStyle };
+    try {
+      const job = await api('/api/jobs', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(request) });
+      setJobs((current) => [job, ...current]);
+    } catch (e) { setError(e.message); } finally { setSubmitting(false); }
   }
 
   if (!config) return <main className="boot">Opening Cutroom…</main>;
@@ -173,7 +188,8 @@ function App() {
             <label className="field"><span>FRAME</span><select value={resolution} onChange={(e) => setResolution(e.target.value)}><option value="1080x1920">Vertical · 9:16</option><option value="1920x1080">Landscape · 16:9</option></select></label>
             <label className="field"><span>FILL</span><select value={framing} onChange={(e) => setFraming(e.target.value)}><option value="fit_blur">Fit with blurred sides</option><option value="center_crop">Crop to frame</option></select></label>
           </div>
-          <label className="caption-setting"><span className="caption-icon">Aa</span><span><b>Burn in captions</b><small>Word-level subtitles with a highlighted hook</small></span><input type="checkbox" checked={captions} onChange={(e) => setCaptions(e.target.checked)} /><i /></label>
+          <label className="caption-setting"><span className="caption-icon">Aa</span><span><b>Burn in captions</b><small>Choose highlighted or plain white captions</small></span><input type="checkbox" checked={captions} onChange={(e) => setCaptions(e.target.checked)} /><i /></label>
+          <label className="field"><span>CAPTION STYLE</span><select value={captionStyle} onChange={(e) => setCaptionStyle(e.target.value)} disabled={!captions}><option value="word_highlight">Yellow word highlight</option><option value="plain">Plain white</option></select></label>
           <button className="submit" type="submit" disabled={submitting || (inputType === 'library' && !videoID) || (inputType === 'url' && !url.trim())}>
             {submitting ? 'Starting pipeline…' : <>Generate cuts <span>↗</span></>}
           </button>
@@ -198,7 +214,7 @@ function App() {
     <section className="results-section"><div className="results-heading"><div><span className="step">04</span><h2>Ready to review</h2></div><span className="result-count">{clips.length} CUT{clips.length === 1 ? '' : 'S'}</span></div>
       {clips.length === 0 ? <div className="empty-results"><div className="empty-frame">▭</div><b>Your next cut will land here.</b><span>Completed renders are saved in your review queue.</span></div> : <div className="clip-grid">{clips.map((clip) => {
         const filename = clip.clip_path.split(/[\\/]/).pop();
-        return <article className="clip-card" key={filename}><video controls preload="metadata" src={`/clips/${encodeURIComponent(filename)}`} /><div className="clip-meta"><div className="clip-score">EDITORIAL SCORE {Math.round(clip.score * 100)}/100 · ESTIMATE</div><h3>{clip.title}</h3><p>{clip.virality_reason || clip.rationale}</p>{clip.upload_description && <details><summary>Suggested description</summary><textarea aria-label="Suggested description" rows={5} readOnly value={clip.upload_description} /></details>}{clip.hook_quote && <blockquote>“{clip.hook_quote}”</blockquote>}<div className="clip-bottom"><span>{fmt(clip.end - clip.start)} · {clip.source_title}</span><a href={`/clips/${encodeURIComponent(filename)}`} download>Download MP4 ↓</a></div></div></article>;
+        return <article className="clip-card" key={filename}><video controls preload="metadata" src={`/clips/${encodeURIComponent(filename)}`} /><div className="clip-meta"><div className="clip-score">EDITORIAL SCORE {Math.round(clip.score * 100)}/100 · ESTIMATE</div><h3>{clip.title}</h3><p>{clip.virality_reason || clip.rationale}</p>{clip.thumbnail_path && <details><summary>Cover preview</summary><img alt="Generated cover" style={{ width: '100%', maxHeight: 320, objectFit: 'contain' }} src={`/clips/${encodeURIComponent(clip.thumbnail_path.split(/[\\/]/).pop())}`} /></details>}{clip.upload_description && <details><summary>Suggested description</summary><textarea aria-label="Suggested description" rows={5} readOnly value={clip.upload_description} /></details>}{clip.hook_quote && <blockquote>“{clip.hook_quote}”</blockquote>}<small>Conversion uses the duration settings above for the selected format, or that format’s defaults.</small><div className="conversion-actions"><button type="button" disabled={submitting} onClick={() => convertClip(filename, 'short')}>Create Short</button><button type="button" disabled={submitting} onClick={() => convertClip(filename, 'video')}>Extend to video</button></div><div className="clip-bottom"><span>{fmt(clip.end - clip.start)} · {clip.source_title}</span><a href={`/clips/${encodeURIComponent(filename)}`} download>Download MP4 ↓</a>{clip.thumbnail_path && <a href={`/clips/${encodeURIComponent(clip.thumbnail_path.split(/[\\/]/).pop())}`} download>Download cover ↓</a>}</div></div></article>;
       })}</div>}
     </section>
     <footer><span>Cutroom</span><span>Built for thoughtful cuts. Runs on this machine.</span></footer>

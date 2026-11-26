@@ -277,6 +277,11 @@ func main() {
 				failed = true
 				continue
 			}
+			if err := ensureThumbnail(ctx, out, c); err != nil {
+				log.Printf("cut [%d] cover: %v", i, err)
+				failed = true
+				continue
+			}
 			rendered++
 			fmt.Printf("OK [%d] %s (%s)\n", i, out, c.Title)
 		}

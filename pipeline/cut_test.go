@@ -2,7 +2,9 @@ package pipeline
 
 import (
 	"context"
+	"image"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 )
@@ -80,5 +82,64 @@ func TestCutPreservesExistingClipWhenRenderFails(t *testing.T) {
 	leftovers, err := filepath.Glob(filepath.Join(dir, ".render-*.mp4"))
 	if err != nil || len(leftovers) != 0 {
 		t.Fatalf("temporary render remains: %v (%v)", leftovers, err)
+	}
+}
+
+func TestThumbnailPreservesExistingFileWhenFFmpegFails(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "ffmpeg")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\nexit 1\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+	clip := filepath.Join(dir, "clip.mp4")
+	thumb := ThumbnailPath(clip)
+	if err := os.WriteFile(thumb, []byte("original"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := GenerateThumbnail(context.Background(), clip, "A title", 54); err == nil {
+		t.Fatal("expected error")
+	}
+	got, err := os.ReadFile(thumb)
+	if err != nil || string(got) != "original" {
+		t.Fatalf("original thumbnail changed: %q %v", got, err)
+	}
+}
+
+func TestGenerateThumbnailFromVideo(t *testing.T) {
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		t.Skip("ffmpeg unavailable")
+	}
+	dir := t.TempDir()
+	clip := filepath.Join(dir, "clip.mp4")
+	cmd := exec.Command("ffmpeg", "-nostdin", "-v", "error", "-y", "-f", "lavfi", "-i", "color=c=blue:s=360x640:r=1:d=2", "-c:v", "libx264", "-pix_fmt", "yuv420p", clip)
+	if b, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("fixture: %v %s", err, b)
+	}
+	if err := GenerateThumbnail(context.Background(), clip, "Por que a IA mudou tudo? 100%", 2); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(ThumbnailPath(clip))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	size, format, err := image.DecodeConfig(f)
+	if err != nil || format != "jpeg" || size.Width != 720 || size.Height != 1280 {
+		t.Fatalf("thumbnail: %+v %s %v", size, format, err)
+	}
+}
+
+func TestPlainCaptionOutputDoesNotOverwriteHighlightedCut(t *testing.T) {
+	cfg := Config{}
+	cfg.Storage.ClipsPending = t.TempDir()
+	ep := Episode{SourceID: "s", VideoID: "v"}
+	c := Candidate{Start: 1, End: 51}
+	cfg.Clip.Captions.Style = "word_highlight"
+	highlight := CutOutputPath(cfg, ep, c)
+	cfg.Clip.Captions.Style = "plain"
+	plain := CutOutputPath(cfg, ep, c)
+	if highlight == plain {
+		t.Fatalf("caption variants share output path %s", plain)
 	}
 }

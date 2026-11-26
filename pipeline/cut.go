@@ -142,7 +142,11 @@ func videoEncoderArgs(encoder string) ([]string, error) {
 
 // CutOutputPath uses millisecond boundaries so adjacent candidates do not collide.
 func CutOutputPath(cfg Config, ep Episode, c Candidate) string {
-	name := fmt.Sprintf("%s__%s__%012d-%012d.mp4", ep.SourceID, ep.VideoID, int64(math.Round(c.Start*1000)), int64(math.Round(c.End*1000)))
+	suffix := ""
+	if cfg.Clip.Captions.Style == "plain" {
+		suffix = "__plain"
+	}
+	name := fmt.Sprintf("%s__%s__%012d-%012d%s.mp4", ep.SourceID, ep.VideoID, int64(math.Round(c.Start*1000)), int64(math.Round(c.End*1000)), suffix)
 	return filepath.Join(cfg.Storage.ClipsPending, name)
 }
 

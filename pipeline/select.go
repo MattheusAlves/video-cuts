@@ -49,6 +49,7 @@ func SelectorPrompt(cfg Config, sourceID string, ep Episode, t Transcript) strin
 	fmt.Fprintf(&b, "Source video title (background only): %s\n", ep.Title)
 	fmt.Fprintln(&b, "Choose cuts that a new viewer can understand without prior context: include the subject, who or what is being discussed, and the essential setup within the spoken clip itself. Resolve unclear pronouns and referents by including the necessary earlier words; reject a moment if that cannot fit without losing its natural opening, story, and payoff. The title and description cannot repair a clip that depends on omitted context.")
 	fmt.Fprintln(&b, "Write the title and description in Brazilian Portuguese for a viewer who has not seen the source. The title must stand alone, name the subject or concrete stakes, and create curiosity about the clip and full video without relying on vague pronouns, missing names, or unexplained references. The description must briefly explain the relevant context and give an honest reason to watch the full video. Do not invent facts, identities, outcomes or promises about material outside the supplied transcript. Do not write a URL or hashtags inside the description; these are added separately.")
+	fmt.Fprintln(&b, "For Shorts, the actual first three seconds must give a new viewer a concrete reason to keep watching: a specific surprise, clear tension, question, unusual claim, or practical promise supported by the clip. Start cleanly at the first word of that opening, never a leftover fragment from the previous sentence. The hook_quote must begin with the very first spoken word of the clip; use the shortest literal phrase that captures the opening. Do not rely on a stronger payoff later, a provocative title, or controversy alone to make a weak opening sound compelling. Prefer no clip over a generic or confusing opening, and never change the speaker's meaning.")
 	fmt.Fprintln(&b, "Score each candidate independently for its suitability to the requested YouTube format, based only on this transcript. Consider the opening's immediate ability to stop a scroll, clarity without prior context, tension or curiosity, development and payoff, and whether the moment rewards continued attention. Use the full 0–1 scale: below 0.5 weak, 0.5–0.69 ordinary, 0.7–0.84 strong, 0.85–1 exceptional. Explain the concrete evidence and limitations in virality_reason; do not promise virality or infer visuals or audience behavior from text. Scores are editorial judgments, not probabilities.")
 	if cfg.Selector.PromptFormat == "compact" {
 		fmt.Fprintf(&b, "Selecione até %d cortes independentes de %d a %d segundos em português. Preserve contexto e sentido. Cada corte deve abrir com gancho literal forte, ter desenvolvimento e conclusão completa. Evite publicidade, saudações e frases incompletas. Não invente fatos.\n", cfg.Selector.CandidatesPerEpisode, cfg.Clip.TargetSecondsMin, cfg.Clip.TargetSecondsMax)
@@ -457,7 +458,7 @@ func Select(ctx context.Context, cfg Config, ep Episode, t Transcript) ([]Candid
 		data, _ := json.Marshal(struct {
 			Version   string
 			Candidate Candidate
-		}{"story-review-v3-standalone", c})
+		}{"story-review-v4-opening", c})
 		return fmt.Sprintf("%x", sha256.Sum256(data))
 	}
 	saveCheckpoint := func() error {
@@ -810,7 +811,7 @@ func candidateFailureReasons(c Candidate, t Transcript, cfg Config, start, end f
 	if !(c.Score >= 0 && c.Score <= 1 && strings.TrimSpace(c.Title) != "" && strings.TrimSpace(c.ViralityReason) != "" && len(c.AttentionSignals) > 0) {
 		reasons = append(reasons, "metadata")
 	}
-	if !hasHookEvidence(c, t.Words) {
+	if !hasHookEvidence(c, t.Words) || (!cfg.Clip.LongForm && !hasOpeningHookEvidence(c, t.Words)) {
 		reasons = append(reasons, "hook")
 	}
 	if !hasStoryEvidence(c, t.Words) {
@@ -883,12 +884,16 @@ func repairCandidateBoundaries(c Candidate, t Transcript, cfg Config, windowStar
 func reviewStories(ctx context.Context, provider ChatProvider, candidates []Candidate, t Transcript) ([]Candidate, error) {
 	var prompt strings.Builder
 	prompt.WriteString("Review from the perspective of a new viewer who has not seen the full source. Reject a clip if its spoken content does not establish the necessary subject and setup, or if an important pronoun, person, event, or claim has an unclear referent. The title, description and outside context cannot supply missing context for the clip itself.\n")
+	prompt.WriteString("Evaluate hook_strong from FIRST THREE SECONDS alone, as heard by someone scrolling with no title or prior context. It must give a specific, understandable reason to keep watching immediately. Reject leftover words from a previous sentence, generic setup, greetings, unexplained references, or openings whose appeal depends on a later line. Strong emotion or controversy alone is insufficient. Review the complete clip separately for story and fidelity.\n")
 	prompt.WriteString("Avalie cada corte de forma rigorosa. Aceite apenas se o próprio corte tiver contexto, desenvolvimento e conclusão clara, E se a fala literal indicada como gancho realmente abrir o corte nos primeiros 3 segundos e tiver potencial concreto de capturar atenção sem distorcer o sentido. Considere curiosidade, surpresa/revelação, opinião forte, conflito, reação emocional, frase memorável, payoff ou valor prático. Rejeite frases cortadas, respostas/desfechos fora do corte, ganchos genéricos ou enganosos e trechos que precisem do contexto anterior. Não deduza conclusão de texto fora do corte. O CONTEXTO é apenas para identificar cortes no meio do raciocínio. Retorne somente JSON {\"reviews\":[{\"index\":0,\"complete\":true,\"hook_strong\":true,\"reason\":\"...\"}]} com um item por índice.\n")
 	for i, c := range candidates {
 		fmt.Fprintf(&prompt, "\nCORTE %d (%.2f–%.2f):\n", i, c.Start, c.End)
 		fmt.Fprintf(&prompt, "GANCHO PROPOSTO: %q\nSINAIS: %s\nMOTIVO DE RETENÇÃO: %s\n", c.HookQuote, strings.Join(c.AttentionSignals, ", "), c.ViralityReason)
-		var clip, before, after strings.Builder
+		var clip, before, after, opening strings.Builder
 		for _, w := range t.Words {
+			if w.Start >= c.Start && w.End <= minFloat(c.Start+3, c.End) {
+				fmt.Fprintf(&opening, "%s ", w.Word)
+			}
 			switch {
 			case w.Start >= c.Start && w.End <= c.End:
 				fmt.Fprintf(&clip, "%s ", w.Word)
@@ -898,7 +903,7 @@ func reviewStories(ctx context.Context, provider ChatProvider, candidates []Cand
 				fmt.Fprintf(&after, "%s ", w.Word)
 			}
 		}
-		fmt.Fprintf(&prompt, "ANTES: %s\nCORTE: %s\nDEPOIS: %s\n", before.String(), clip.String(), after.String())
+		fmt.Fprintf(&prompt, "FIRST THREE SECONDS: %s\nANTES: %s\nCORTE: %s\nDEPOIS: %s\n", strings.TrimSpace(opening.String()), before.String(), clip.String(), after.String())
 	}
 	var lastErr error
 	for attempt := 0; attempt < 2; attempt++ {
@@ -972,7 +977,9 @@ func normalizeAttentionSignals(signals []string) []string {
 	return out
 }
 
-func hasHookEvidence(c Candidate, words []Word) bool {
+func hasHookEvidence(c Candidate, words []Word) bool        { return hookEvidence(c, words, false) }
+func hasOpeningHookEvidence(c Candidate, words []Word) bool { return hookEvidence(c, words, true) }
+func hookEvidence(c Candidate, words []Word, requireFirst bool) bool {
 	phrase := normalizedWords(c.HookQuote)
 	if len(phrase) < 2 || len(phrase) > 60 {
 		return false
@@ -998,7 +1005,7 @@ func hasHookEvidence(c Candidate, words []Word) bool {
 				break
 			}
 		}
-		if matches && starts[i] >= c.Start && starts[i] < deadline && ends[i+len(phrase)-1] <= c.End {
+		if matches && (!requireFirst || i == 0) && starts[i] >= c.Start && starts[i] < deadline && ends[i+len(phrase)-1] <= c.End {
 			return true
 		}
 	}

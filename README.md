@@ -45,9 +45,10 @@ tokens; a truncated response is reported as an error rather than used as a cut.
 
 The selector ranks attention signals such as surprise, strong opinions,
 conflict, revelations and quotable lines. Each candidate must open with a
-literal spoken hook that starts in its first three seconds; the complete quote is checked against
-word timestamps, gets larger opening captions, and is reviewed along with the
-complete story. Selection uses the transcript, so it cannot identify silent
+literal spoken hook; for Shorts the quoted hook must begin with the first
+spoken words. A separate editorial review judges the first three seconds on
+their own as well as the complete story. Quotes are checked against word
+timestamps and opening captions are enlarged. Selection uses the transcript, so it cannot identify silent
 visual reactions. These checks can reject every candidate and do not guarantee
 retention; review the whole clip and its context. For wide shots, `fit_blur`
 framing preserves the source frame over a blurred vertical background.
@@ -71,7 +72,7 @@ For frontend development, start the Go backend from the project root with
 `http://127.0.0.1:5173/`). Vite proxies API and clip requests to the backend.
 Choose a configured channel and recent video, or paste
 a YouTube video link. The form selects Short or regular-video output, duration,
-frame, framing, captions, and a minimum editorial score from 0 to 100. The
+frame, framing, captions (yellow word highlight or plain white), and a minimum editorial score from 0 to 100. The
 studio scans the full transcript and renders distinct candidates that meet the
 threshold and pass story and timing checks. The score is a subjective AI
 estimate of attention potential, not a prediction of views or virality. The
@@ -79,7 +80,11 @@ default threshold comes from `selector.min_score` (0.0–1.0) in `config.yaml`;
 `candidates_per_episode` limits proposals per transcript window, so the scan
 can still miss moments. Regular videos default to 4–28 minutes and
 landscape output; the 28-minute maximum is enforced by the pipeline. Renders
-appear in the review queue in the studio and in `clips/pending/`. To rebuild the
+appear in the review queue in the studio and in `clips/pending/`. Each new cut
+also gets a separate JPEG cover made from a frame and its suggested title; the
+studio lets you preview and download it. FFmpeg needs the drawtext filter and a
+suitable font. Covers are suggestions for review; existing cuts receive one
+when their job is retried. In the review queue, **Extend to video** selects a longer, coherent range surrounding the chosen cut; **Create Short** selects a shorter range inside it. Set the target format and its duration range in the form before converting, or the target format defaults are used. The original stays in the queue. Conversion may download the source again and may return no result if no range passes the duration, score and editorial checks. To rebuild the
 embedded UI after editing it, run `npm run build:embedded` from `web/`, then
 rebuild the Go binary. The embedded app is served at `http://127.0.0.1:8765/`.
 

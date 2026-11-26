@@ -187,6 +187,7 @@ func TestUIHandlerServesEmbeddedStudioAndLocalAPI(t *testing.T) {
 	var processedLongForm bool
 	var processedResolution string
 	var processedCaptions bool
+	var processedCaptionStyle string
 	s := &uiServer{
 		cfg:   cfg,
 		state: state,
@@ -196,6 +197,7 @@ func TestUIHandlerServesEmbeddedStudioAndLocalAPI(t *testing.T) {
 			processedLongForm = received.Clip.LongForm
 			processedResolution = received.Clip.Resolution
 			processedCaptions = received.Clip.Captions.Enabled
+			processedCaptionStyle = received.Clip.Captions.Style
 			finished <- struct{}{}
 			return nil
 		},
@@ -268,13 +270,21 @@ func TestUIHandlerServesEmbeddedStudioAndLocalAPI(t *testing.T) {
 	if clipResponse.Code != http.StatusOK || clipResponse.Body.String() != "clip bytes" {
 		t.Fatalf("GET clip = %d %q", clipResponse.Code, clipResponse.Body.String())
 	}
+	if err := os.WriteFile(filepath.Join(cfg.Storage.ClipsPending, "ready.cover.jpg"), []byte("cover bytes"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cover := httptest.NewRecorder()
+	handler.ServeHTTP(cover, httptest.NewRequest(http.MethodGet, "/clips/ready.cover.jpg", nil))
+	if cover.Code != http.StatusOK || cover.Body.String() != "cover bytes" {
+		t.Fatalf("GET cover = %d %q", cover.Code, cover.Body.String())
+	}
 	missingClip := httptest.NewRecorder()
 	handler.ServeHTTP(missingClip, httptest.NewRequest(http.MethodGet, "/clips/missing.mp4", nil))
 	if missingClip.Code != http.StatusNotFound {
 		t.Fatalf("missing clip status = %d, want 404", missingClip.Code)
 	}
 
-	postBody := `{"url":"https://youtu.be/video","mode":"video","min_seconds":240,"max_seconds":1680,"resolution":"1920x1080","framing":"fit_blur","captions_enabled":false}`
+	postBody := `{"url":"https://youtu.be/video","mode":"video","min_seconds":240,"max_seconds":1680,"resolution":"1920x1080","framing":"fit_blur","captions_enabled":false,"caption_style":"plain"}`
 	start := httptest.NewRecorder()
 	startRequest := httptest.NewRequest(http.MethodPost, "/api/jobs", strings.NewReader(postBody))
 	startRequest.Header.Set("Content-Type", "application/json")
@@ -314,7 +324,7 @@ func TestUIHandlerServesEmbeddedStudioAndLocalAPI(t *testing.T) {
 			t.Fatalf("job did not complete: %#v", completed)
 		}
 	}
-	if !processedLongForm || processedResolution != "1920x1080" || processedCaptions || completed.Request.CaptionsEnabled == nil || *completed.Request.CaptionsEnabled {
+	if !processedLongForm || processedResolution != "1920x1080" || processedCaptions || processedCaptionStyle != "plain" || completed.Request.CaptionsEnabled == nil || *completed.Request.CaptionsEnabled {
 		t.Fatalf("completed job = %#v; processed longform=%t resolution=%s captions=%t", completed, processedLongForm, processedResolution, processedCaptions)
 	}
 
@@ -391,5 +401,43 @@ func TestConfigExposesMinimumScore(t *testing.T) {
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil || response.MinScore != 0.7 {
 		t.Fatalf("config: %s %v", w.Body.String(), err)
+	}
+}
+
+func TestConversionRequestRequiresSavedClip(t *testing.T) {
+	cfg := uiTestConfig(t)
+	cfg.Storage.ClipsPending = t.TempDir()
+	video := filepath.Join(cfg.Storage.ClipsPending, "saved.mp4")
+	if err := os.WriteFile(video, []byte("video"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	clip := pl.PendingClip{Candidate: pl.Candidate{SourceID: "s", VideoID: "v", Start: 0, End: 60}, SourceURL: "https://youtu.be/v", ClipPath: video}
+	if err := pl.WritePendingSidecar(video, clip); err != nil {
+		t.Fatal(err)
+	}
+	s := &uiServer{cfg: cfg}
+	for _, tc := range []struct {
+		name  string
+		valid bool
+	}{{"saved.mp4", true}, {"missing.mp4", false}, {"../saved.mp4", false}} {
+		r := jobRequest{ConvertClip: tc.name, Mode: "video"}
+		err := s.prepareRequest(&r)
+		if (err == nil) != tc.valid {
+			t.Errorf("%s: %v", tc.name, err)
+		}
+	}
+}
+
+func TestCaptionStyleValidation(t *testing.T) {
+	s := &uiServer{cfg: uiTestConfig(t)}
+	for _, tc := range []struct {
+		style string
+		valid bool
+	}{{"", true}, {"plain", true}, {"word_highlight", true}, {"invalid", false}} {
+		r := jobRequest{URL: "https://youtu.be/video", CaptionStyle: tc.style}
+		err := s.prepareRequest(&r)
+		if (err == nil) != tc.valid {
+			t.Errorf("%s: %v", tc.style, err)
+		}
 	}
 }

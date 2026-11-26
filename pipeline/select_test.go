@@ -803,3 +803,49 @@ func TestStoryReviewRequiresContextInsideClip(t *testing.T) {
 		}
 	}
 }
+
+func TestConversionSelectsAnchoredDifferentRange(t *testing.T) {
+	cfg := Config{}
+	cfg.Clip.TargetSecondsMin = 45
+	cfg.Clip.TargetSecondsMax = 60
+	tr := Transcript{DurationS: 150, Words: storyWords(10), Segments: []Segment{{Start: 0, End: 150, Text: "começo claro algo mudou final chegou"}}}
+	ep := Episode{SourceID: "s", VideoID: "v", DurationS: 150}
+	raw := `{"clips":[{"start":10,"end":60,"score":0.8,"title":"new"` + testStory + `}]}`
+	for _, tc := range []struct {
+		name     string
+		original Candidate
+		expand   bool
+		want     bool
+	}{{"expand", Candidate{Start: 20, End: 40}, true, true}, {"shorten", Candidate{Start: 0, End: 100}, false, true}, {"outside", Candidate{Start: 65, End: 90}, true, false}, {"unchanged", Candidate{Start: 10, End: 60}, true, false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &sequenceChatProvider{responses: []string{raw, `{"reviews":[{"index":0,"complete":true,"hook_strong":true}]}`}}
+			got, err := selectConversion(context.Background(), cfg, ep, tr, tc.original, tc.expand, p)
+			if (err == nil) != tc.want {
+				t.Fatalf("got %+v err %v", got, err)
+			}
+		})
+	}
+}
+
+func TestHookMustBeginWithFirstSpokenWords(t *testing.T) {
+	words := []Word{{Word: "euros.", Start: 0, End: 0.3}, {Word: "Sou", Start: 0.3, End: 0.6}, {Word: "de", Start: 0.6, End: 0.8}, {Word: "direita", Start: 0.8, End: 1.2}}
+	c := Candidate{Start: 0, End: 8, HookQuote: "Sou de direita"}
+	if hasOpeningHookEvidence(c, words) {
+		t.Fatal("accepted a hook that skips the first spoken word")
+	}
+	c.HookQuote = "euros Sou de direita"
+	if !hasOpeningHookEvidence(c, words) {
+		t.Fatal("rejected a literal opening quote")
+	}
+}
+func TestStoryReviewIsolatesOpening(t *testing.T) {
+	p := &captureReviewPrompt{}
+	tr := Transcript{Words: []Word{{Word: "agora", Start: 0, End: 0.5}, {Word: "atenção", Start: 2.4, End: 2.9}, {Word: "depois", Start: 3.2, End: 3.6}}}
+	_, err := reviewStories(context.Background(), p, []Candidate{{Start: 0, End: 10}}, tr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(p.prompt, "FIRST THREE SECONDS: agora atenção") || strings.Contains(p.prompt, "FIRST THREE SECONDS: agora atenção depois") {
+		t.Fatalf("opening not isolated: %s", p.prompt)
+	}
+}
